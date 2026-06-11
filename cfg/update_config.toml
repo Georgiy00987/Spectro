@@ -1,0 +1,6 @@
+[github_update]
+repo = ""
+branch = "main"
+version_file = "version"
+token = ""
+backup = true

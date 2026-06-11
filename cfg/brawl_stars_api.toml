@@ -1,0 +1,6 @@
+# Optional. Used for trophy autofill and Push All.
+# Create an API token in the Brawl Stars developer portal and allow your public IP.
+
+api_token = ""
+player_tag = "#YOURTAG"
+timeout_seconds = 15

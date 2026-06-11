@@ -1,0 +1,2 @@
+python tools/create_wall_dataset.py 
+python tools/train_wall_model.py --data datasets\wall_model\data.yaml --device 0 --epochs 80 --imgsz 640 --replace

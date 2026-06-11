@@ -1,0 +1,6 @@
+[telegram]
+enabled = "no"
+bot_token = "YOUR_BOT_TOKEN"
+chat_id = "YOUR_CHAT_ID"
+poll_timeout = 20
+idle_sleep = 8

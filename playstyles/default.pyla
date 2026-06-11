@@ -1,0 +1,114 @@
+{"name": "Default Playstyle", "description": "main combat logic with fixed ability readiness", "brawlers": ["all"], "gamemodes": ["all"], "author": "Forgeter", "date": "2026-06-10"}
+def teammate_or_default_movement():
+    closest_teammate_coords, _ = find_closest_teammate(teammate_data, player_pos, walls)
+    if not closest_teammate_coords:
+        return no_enemy_movement(player_data, walls)
+    direction_x = closest_teammate_coords[0] - player_pos[0]
+    direction_y = closest_teammate_coords[1] - player_pos[1]
+    move_horizontal = get_horizontal_move_key(direction_x)
+    move_vertical = get_vertical_move_key(direction_y)
+    movement_options = []
+    if move_horizontal and move_vertical:
+        movement_options.append(move_horizontal + move_vertical)
+    elif move_horizontal:
+        movement_options.append(move_horizontal)
+    elif move_vertical:
+        movement_options.append(move_vertical)
+    else:
+        movement_options.append("W")
+
+    for move in movement_options:
+        if not is_path_blocked(player_pos, move, walls):
+            return move
+    alternative_moves = ["W", "A", "S", "D"]
+    for move in alternative_moves:
+        if not is_path_blocked(player_pos, move, walls):
+            return move
+    return movement_options[0]
+
+def avoid_poison_gas():
+    opposite_direction = {"up": "S", "down": "W", "left": "D", "right": "A"}
+    gas_movement = ""
+    for direction in ["up", "down"]:
+        if is_there_poison_gas(direction, player_data):
+            gas_movement += opposite_direction[direction]
+            break
+    for direction in ["left", "right"]:
+        if is_there_poison_gas(direction, player_data):
+            gas_movement += opposite_direction[direction]
+            break
+    return gas_movement
+
+brawler_info = brawlers_info.get(brawler)
+if not brawler_info:
+    raise ValueError(f"Brawler '{brawler}' not found in brawlers info.")
+must_brawler_hold_attack = must_brawler_hold_attack(brawler, brawlers_info)
+if must_brawler_hold_attack and persistent_data["time_since_holding_attack"] is not None and time.time() - persistent_data["time_since_holding_attack"] >= brawler_info['hold_attack'] + seconds_to_hold_attack_after_reaching_max:
+    attack(touch_up=True, touch_down=False)
+    persistent_data["time_since_holding_attack"] = None
+
+safe_range, attack_range, super_range = get_brawler_range(brawler)
+player_pos = get_player_pos(player_data)
+if debug:
+    print("found player pos:", player_pos)
+anti_poison_gas_movement = avoid_poison_gas()
+if not is_there_enemy(enemy_data):
+    movement = anti_poison_gas_movement or teammate_or_default_movement()
+else:
+    enemy_coords, enemy_distance = find_closest_enemy(enemy_data, player_pos, walls, "attack")
+    if enemy_coords is None:
+        movement = anti_poison_gas_movement or teammate_or_default_movement()
+    else:
+        if debug:
+            print("found enemy pos:", enemy_coords)
+        direction_x = enemy_coords[0] - player_pos[0]
+        direction_y = enemy_coords[1] - player_pos[1]
+
+        # --- ANALOG APPROACH: drive the joystick by exact angle, not WASD diagonals ---
+        toward_angle = angle_from_direction(direction_x, direction_y)
+        current_time = time.time()
+
+        if enemy_distance > safe_range:
+            # Walk straight at the enemy (smooth analog approach).
+            desired_angle = toward_angle
+            # Already in shooting range while closing in -> strafe so we are not a sitting duck.
+            if enemy_distance <= attack_range:
+                desired_angle = apply_combat_dodge(
+                    desired_angle, toward_angle, current_time, enemy_distance, safe_range
+                )
+        else:
+            # Too close: back off while strafing to keep our preferred range.
+            desired_angle = blend_angles(
+                angle_opposite(toward_angle),
+                get_strafe_angle(toward_angle, current_time, enemy_distance, safe_range),
+                0.4,
+            )
+
+        # Wall-aware: nearest unblocked angle to the desired direction.
+        movement = find_best_angle(player_pos, desired_angle, walls)
+
+        if is_super_ready and persistent_data["time_since_holding_attack"] is None:
+            super_type = brawler_info['super_type']
+            enemy_hittable = is_enemy_hittable(player_pos, enemy_coords, walls, "super")
+            if should_use_super_on_enemy(
+                brawler, super_type, enemy_distance, attack_range, super_range, enemy_hittable
+            ):
+                if is_hypercharge_ready:
+                    use_hypercharge()
+                use_super()
+
+        if enemy_distance <= attack_range:
+            enemy_hittable = is_enemy_hittable(player_pos, enemy_coords, walls, "attack")
+            if enemy_hittable:
+                if is_gadget_ready and persistent_data["time_since_holding_attack"] is None:
+                    use_gadget()
+
+                if not must_brawler_hold_attack:
+                    attack()
+                else:
+                    if persistent_data["time_since_holding_attack"] is None:
+                        persistent_data["time_since_holding_attack"] = time.time()
+                        attack(touch_up=False, touch_down=True)
+                    elif time.time() - persistent_data["time_since_holding_attack"] >= brawlers_info[brawler]['hold_attack']:
+                        attack(touch_up=True, touch_down=False)
+                        persistent_data["time_since_holding_attack"] = None
