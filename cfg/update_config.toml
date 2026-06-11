@@ -1,5 +1,5 @@
 [github_update]
-repo = ""
+repo = "Georgiy00987/Spectro"
 branch = "main"
 version_file = "version"
 token = ""
