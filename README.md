@@ -2,6 +2,8 @@
 
 Spectro is a Windows automation assistant for Brawl Stars. It runs through an Android emulator, reads the current game state from the screen, and controls movement/actions through the configured emulator key layout.
 
+Dev: t.me/forget_git
+
 ## Features
 
 - Brawlball-focused gameplay automation
