@@ -25,3 +25,4 @@ low_ips_recovery_seconds = 45
 low_ips_recovery_cooldown = 35
 low_ips_app_restart_after = 3
 low_ips_emulator_restart_after = 6
+post_match_transition_wait_seconds = 3.0

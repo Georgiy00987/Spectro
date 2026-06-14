@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import html as html_lib
+import json
+import os
 import re
 import ssl
 import time
@@ -12,6 +14,57 @@ from requests.adapters import HTTPAdapter
 
 # Trophies are read from the public brawltracker.com player page.
 # Only the player tag is required: no API token, developer account, or registration.
+
+CACHE_PATH = os.path.join("cfg", "brawltracker_cache.json")
+CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+
+
+def _load_cache():
+    try:
+        with open(CACHE_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_cache(cache):
+    try:
+        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        with open(CACHE_PATH, "w", encoding="utf-8") as f:
+            json.dump(cache, f, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        print(f"Could not save Brawltracker cache: {exc}")
+
+
+def _cache_key(tag):
+    return clean_tag(tag)
+
+
+def _get_cached_player(tag, max_age_seconds=CACHE_MAX_AGE_SECONDS):
+    cache = _load_cache()
+    item = cache.get(_cache_key(tag))
+    if not isinstance(item, dict):
+        return None
+    saved_at = float(item.get("saved_at", 0) or 0)
+    if max_age_seconds is not None and time.time() - saved_at > max_age_seconds:
+        return None
+    player = item.get("player")
+    if not isinstance(player, dict) or not player.get("brawlers"):
+        return None
+    player = dict(player)
+    player["source"] = "brawltracker_cache"
+    player["cache_age_seconds"] = int(time.time() - saved_at) if saved_at else None
+    return player
+
+
+def _set_cached_player(tag, player):
+    if not isinstance(player, dict) or not player.get("brawlers"):
+        return
+    cache = _load_cache()
+    cache[_cache_key(tag)] = {"saved_at": time.time(), "player": player}
+    _save_cache(cache)
+
 
 HEADERS = {
     "User-Agent": (
@@ -147,6 +200,25 @@ def parse_brawltracker_html(page_html, tag):
 
 
 def fetch_player_brawlers(player_tag, timeout=15, current_trophies=None):
-    """Fetch a player's brawler trophies from brawltracker.com using only the player tag."""
-    page_html = fetch_html(player_tag, timeout=timeout, current_trophies=current_trophies)
-    return parse_brawltracker_html(page_html, player_tag)
+    """Fetch a player's brawler trophies from brawltracker.com using only the player tag.
+
+    Brawltracker can intermittently fail TLS handshakes or time out. Successful
+    responses are cached and reused on temporary network failures so selection
+    and post-match logic can continue instead of blocking on the website.
+    """
+    try:
+        page_html = fetch_html(player_tag, timeout=timeout, current_trophies=current_trophies)
+        player = parse_brawltracker_html(page_html, player_tag)
+        _set_cached_player(player_tag, player)
+        return player
+    except Exception as exc:
+        cached = _get_cached_player(player_tag)
+        if cached is not None:
+            age = cached.get("cache_age_seconds")
+            print(
+                "Brawltracker request failed; using cached player data"
+                + (f" from {age}s ago" if age is not None else "")
+                + f". Error: {type(exc).__name__}: {exc}"
+            )
+            return cached
+        raise

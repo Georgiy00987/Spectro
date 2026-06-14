@@ -8,15 +8,26 @@ class PushAll1kSelectionTest(unittest.TestCase):
     def test_start_bot_closes_selector_before_heavy_startup(self):
         obj = object.__new__(SelectBrawler)
         obj.brawlers_data = [{"brawler": "shelly"}]
+        obj._closing = False
+        obj._filter_after_id = None
+        obj._image_render_after_id = None
         calls = []
 
-        def close_app():
-            calls.append("close")
+        class _FakeApp:
+            def withdraw(self_):
+                calls.append("close")
+            def update_idletasks(self_):
+                pass
+            def after_cancel(self_, id_):
+                pass
+            def quit(self_):
+                pass
+
+        obj.app = _FakeApp()
 
         def data_setter(data):
             calls.append(("start", data))
 
-        obj.close_app = close_app
         obj.data_setter = data_setter
 
         SelectBrawler.start_bot(obj)

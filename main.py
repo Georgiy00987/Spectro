@@ -124,6 +124,10 @@ def spectro_main(data):
             self.match_launch_pending = False
             self.pending_lobby_since = None
             self.pending_lobby_notice = 0.0
+            self.post_match_lobby_wait_until = 0.0
+            self.post_match_lobby_wait_notice = 0.0
+            self.post_match_transition_until = 0.0
+            self.post_match_transition_notice = 0.0
             self.post_match_reward_until = 0.0
             self.reward_chain_seen = False
             self.last_ignored_prestige_state_time = 0.0
@@ -179,6 +183,9 @@ def spectro_main(data):
             self.post_match_reward_window_seconds = float(
                 time_thresholds.get("post_match_reward_window_seconds", 120.0)
             )
+            self.post_match_transition_wait_seconds = float(
+                time_thresholds.get("post_match_transition_wait_seconds", 3.0)
+            )
             self.lobby_entered_at = None
             self.last_lobby_start_press = 0.0
             self.last_stale_feed_recovery = 0.0
@@ -213,6 +220,9 @@ def spectro_main(data):
             self.disconnect_ocr_interval = 6.0
             self.control_window = RuntimeControlWindow()
             self.control_window.start()
+            self.window_controller.set_pause_checker(
+                lambda: self.control_window.is_paused() or self.control_window.is_stop_requested()
+            )
             self.discord_control = DiscordControlServer(self.control_window.state_path)
             self.discord_control.start()
             self.telegram_control = TelegramControl(
@@ -581,6 +591,10 @@ def spectro_main(data):
             now = time.time()
             if detected_state in MATCH_RESULT_STATES:
                 self.post_match_reward_until = now + self.post_match_reward_window_seconds
+                self.post_match_transition_until = max(
+                    self.post_match_transition_until,
+                    now + self.post_match_transition_wait_seconds,
+                )
 
             reward_chain_active = (
                     self.reward_chain_seen
@@ -606,6 +620,8 @@ def spectro_main(data):
                         pending_for,
                         self.lobby_after_match_confirm_seconds,
                 ):
+                    remaining = max(0.0, self.lobby_after_match_confirm_seconds - pending_for)
+                    self.post_match_lobby_wait_until = max(self.post_match_lobby_wait_until, now + remaining)
                     if now - self.pending_lobby_notice >= 5.0:
                         print(
                             "Ignoring lobby detection until it is stable after match "
@@ -633,6 +649,8 @@ def spectro_main(data):
             elif state == "lobby":
                 self.lobby_seen_since_match = True
                 self.match_launch_pending = False
+                self.post_match_lobby_wait_until = 0.0
+                self.post_match_transition_until = 0.0
                 self.reward_chain_seen = False
             elif state in OUT_OF_MATCH_REWARD_STATES or state in LOBBY_ONLY_REWARD_STATES:
                 self.reward_chain_seen = True
@@ -656,8 +674,10 @@ def spectro_main(data):
                 self.publish_control_details()
                 if state != "match":
                     self.Play.time_since_last_proceeding = time.time()
+                    self.window_controller.stop_gameplay_controls()
                 if previous_state == "match" and state != "match":
                     self.Play.reset_match_control_state()
+                    self.window_controller.stop_gameplay_controls()
                     self.Stage_manager.adaptive_brain.apply_to_play(self.Play)
                 elif previous_state != "match" and state == "match":
                     self.Play.reset_match_control_state()
@@ -722,7 +742,7 @@ def spectro_main(data):
                 self.disconnect_reload_attempts = 0
             else:
                 self.window_controller.click(650, 610, delay=0.08, already_include_ratio=False)
-                time.sleep(3)
+                self.window_controller.pause_aware_sleep(3)
             return True
 
         def handle_offline_emulator(self):
@@ -755,7 +775,7 @@ def spectro_main(data):
                         self.Play.time_since_detections["player"] = time.time()
                         self.Play.time_since_detections["enemy"] = time.time()
                         self.Play.time_since_player_last_found = time.time()
-            time.sleep(2)
+            self.window_controller.pause_aware_sleep(2)
 
         def handle_stale_scrcpy_feed(self, frame_time=None):
             now = time.time()
@@ -818,6 +838,7 @@ def spectro_main(data):
                 return False
 
             if not self.was_paused:
+                self.window_controller.stop_gameplay_controls()
                 self.window_controller.keys_up(list("wasd"))
                 self.Play.reset_match_control_state()
                 self.was_paused = True
@@ -902,13 +923,22 @@ def spectro_main(data):
                 if frame_id == self.last_processed_frame_id:
                     self.perf_duplicate_waits += 1
                     self.recover_slow_feed()
-                    time.sleep(0.01)
+                    self.window_controller.pause_aware_sleep(0.01)
                     continue
                 self.last_processed_frame_id = frame_id
                 c += 1
 
+                if self.handle_pause_control():
+                    s_time = time.time()
+                    c = 0
+                    continue
+
                 state_start = time.perf_counter()
                 self.manage_time_tasks(frame)
+                if self.handle_pause_control():
+                    s_time = time.time()
+                    c = 0
+                    continue
                 self.perf_state_ema = self.update_ema(
                     self.perf_state_ema,
                     time.perf_counter() - state_start,
@@ -918,13 +948,33 @@ def spectro_main(data):
                     continue
 
                 if self.state != "match":
-                    self.window_controller.keys_up(list("wasd"))
-                    time.sleep(0.02)
+                    self.window_controller.stop_gameplay_controls()
+                    self.window_controller.pause_aware_sleep(0.02)
                     continue
 
                 if self.state == "match" and time.time() < self.match_ready_at:
-                    self.window_controller.keys_up(list("wasd"))
-                    time.sleep(0.05)
+                    self.window_controller.stop_gameplay_controls()
+                    self.window_controller.pause_aware_sleep(0.05)
+                    continue
+
+                now = time.time()
+                if self.state == "match" and (
+                    now < self.post_match_lobby_wait_until
+                    or now < self.post_match_transition_until
+                ):
+                    # After a result screen the detector can briefly report match
+                    # while rewards/lobby are still transitioning. Do not run
+                    # gameplay logic during this window, otherwise the bot can press
+                    # attack/joystick buttons in menus.
+                    self.window_controller.stop_gameplay_controls()
+                    wait_until = max(self.post_match_lobby_wait_until, self.post_match_transition_until)
+                    if now - self.post_match_lobby_wait_notice >= 1.0:
+                        print(
+                            "Waiting after match transition "
+                            f"({max(0.0, wait_until - now):.1f}s left)."
+                        )
+                        self.post_match_lobby_wait_notice = now
+                    self.window_controller.pause_aware_sleep(0.05)
                     continue
 
                 brawler = self.Stage_manager.brawlers_pick_data[0]['brawler']
@@ -940,7 +990,7 @@ def spectro_main(data):
                     target_period = 1 / self.max_ips
                     work_time = time.perf_counter() - frame_start
                     if work_time < target_period:
-                        time.sleep(target_period - work_time)
+                        self.window_controller.pause_aware_sleep(target_period - work_time)
 
             self.discord_control.close()
             self.telegram_control.stop()

@@ -62,6 +62,20 @@ class LobbyAutomation:
         self.selected_brawler_key = None
         self.selected_brawler_name = None
 
+    def _pause_aware_sleep(self, duration):
+        sleeper = getattr(self.window_controller, "pause_aware_sleep", None)
+        if callable(sleeper):
+            return sleeper(duration)
+        time.sleep(duration)
+        return True
+
+    def _pause_requested(self):
+        checker = getattr(self.window_controller, "is_pause_requested", None)
+        try:
+            return bool(checker and checker())
+        except Exception:
+            return False
+
     def check_for_idle(self, frame):
         general_config = load_toml_as_dict("cfg/general_config.toml")
         bot_config = load_toml_as_dict("./cfg/bot_config.toml")
@@ -84,15 +98,78 @@ class LobbyAutomation:
             print(f"Could not read current state before brawler selection: {e}")
             return "unknown"
 
+    def recover_to_lobby(self, reason="", timeout=10.0):
+        """Try to return from shop/popups/menus to lobby before selecting brawlers.
+
+        Selection should never crash just because the bot is on a shop or
+        reward screen. This routine identifies the current state, uses safe
+        back/close actions, and waits until lobby is visible.
+        """
+        deadline = time.time() + timeout
+        last_state = None
+        attempts = 0
+        max_attempts = max(1, int(timeout / 0.45) + 1)
+        while time.time() < deadline and attempts < max_attempts:
+            state = self.current_state()
+            if state == "lobby":
+                if attempts:
+                    print(f"Recovered to lobby before brawler selection after {attempts} action(s).")
+                return True
+            if state != last_state:
+                details = f" ({reason})" if reason else ""
+                print(f"Brawler selection recovery: current state is {state}{details}.")
+                last_state = state
+
+            if state in ("match", "match_making"):
+                print(f"Cannot recover to lobby for brawler selection while state is {state}.")
+                return False
+
+            if hasattr(self.window_controller, "stop_gameplay_controls"):
+                self.window_controller.stop_gameplay_controls()
+
+            # Android BACK is safest for shop, events, brawler details, rewards and
+            # most intermediate screens. Coordinate fallbacks cover custom close buttons.
+            self.press_back()
+            attempts += 1
+            self._pause_aware_sleep(0.45)
+
+            state_after_back = self.current_state()
+            if state_after_back == "lobby":
+                print(f"Recovered to lobby before brawler selection after {attempts} action(s).")
+                return True
+            if state_after_back in ("match", "match_making"):
+                return False
+
+            # Generic close/back fallback zones. Keep them conservative: top-left
+            # back, top-right close, lower-right continue/OK.
+            wr = self.window_controller.width_ratio
+            hr = self.window_controller.height_ratio
+            for x, y in ((100, 60), (1840, 80), (1690, 990)):
+                self.window_controller.click(int(x * wr), int(y * hr), delay=0.04)
+                self._pause_aware_sleep(0.2)
+                state_after_click = self.current_state()
+                if state_after_click == "lobby":
+                    print(f"Recovered to lobby before brawler selection after {attempts} action(s).")
+                    return True
+                if state_after_click in ("match", "match_making"):
+                    return False
+
+        print(f"Could not recover to lobby before brawler selection; last state was {last_state}.")
+        return False
+
     def select_brawler(self, brawler):
         # _brawler_search_v2: icon match + per-frame OCR fallback (even when an
         # icon file exists) + edge-guard + end-of-list detection, so a brawler
         # that is present in the list is not skipped when template matching misses.
         current_state = self.current_state()
         if current_state != "lobby":
-            raise RuntimeError(
-                f"Named brawler selection skipped: current state is {current_state}, not lobby."
-            )
+            print(f"Named brawler selection requested from {current_state}; trying to recover to lobby.")
+            if not self.recover_to_lobby(reason=f"select {brawler}", timeout=12.0):
+                print(
+                    f"Named brawler selection skipped safely: could not reach lobby "
+                    f"from state {current_state}."
+                )
+                return False
         target_key = self.normalize_ocr_name(brawler)
         if self.selected_brawler_key == target_key:
             print(f"Brawler {brawler} is already selected; skipping auto-pick.")
@@ -126,16 +203,16 @@ class LobbyAutomation:
         x = self.coords_cfg['lobby']['brawler_btn'][0] * wr
         y = self.coords_cfg['lobby']['brawler_btn'][1] * hr
         self.window_controller.click(x, y)
-        time.sleep(0.8)
+        self._pause_aware_sleep(0.8)
 
         def commit_selection(click_x, click_y, label, detail):
             self.window_controller.click(click_x, click_y)
             print("Found brawler ", brawler, f"({label}: {detail}) clicking on its icon at ", click_x, click_y)
-            time.sleep(1)
+            self._pause_aware_sleep(1)
             select_x = self.coords_cfg['lobby']['select_btn'][0]
             select_y = self.coords_cfg['lobby']['select_btn'][1]
             self.window_controller.click(select_x, select_y, already_include_ratio=False)
-            time.sleep(0.5)
+            self._pause_aware_sleep(0.5)
             print("Selected brawler ", brawler)
             self.selected_brawler_key = target_key
             self.selected_brawler_name = brawler
@@ -236,7 +313,7 @@ class LobbyAutomation:
             scroll_y_start = int(scroll_from_y * hr)
             scroll_y_end = int(scroll_to_y * hr)
             self.window_controller.swipe(scroll_x, scroll_y_start, scroll_x, scroll_y_end, duration=scroll_duration)
-            time.sleep(first_scroll_sleep if c == 0 else scroll_sleep)
+            self._pause_aware_sleep(first_scroll_sleep if c == 0 else scroll_sleep)
             c += 1
             if c == 1:
                 continue
@@ -303,8 +380,10 @@ class LobbyAutomation:
             icon_gray = cv2.cvtColor(icon, cv2.COLOR_BGR2GRAY)
 
         is_conflicted = target_key in _CONFLICTED_BRAWLERS
-        THRESHOLD_STRICT  = 0.72 if is_conflicted else 0.65
-        THRESHOLD_RELAXED = 0.65 if is_conflicted else 0.58
+        # Minimum icon match score for successful brawler selection.
+        # Raised to 0.70 to reduce false-positive brawler picks.
+        THRESHOLD_STRICT  = 0.72 if is_conflicted else 0.70
+        THRESHOLD_RELAXED = 0.70
 
         best_score = 0.0
         best_loc   = None
@@ -385,18 +464,20 @@ class LobbyAutomation:
     def select_lowest_trophy_brawler(self):
         current_state = self.current_state()
         if current_state != "lobby":
-            print(
-                "Lowest-trophy brawler selection skipped: "
-                f"current state is {current_state}, not lobby."
-            )
-            return False
+            print(f"Lowest-trophy brawler selection requested from {current_state}; trying to recover to lobby.")
+            if not self.recover_to_lobby(reason="lowest trophy selection", timeout=12.0):
+                print(
+                    "Lowest-trophy brawler selection skipped safely: "
+                    f"could not reach lobby from state {current_state}."
+                )
+                return False
 
         wr = self.window_controller.width_ratio
         hr = self.window_controller.height_ratio
 
         def tap(x, y, wait=0.6):
             self.window_controller.click(int(x * wr), int(y * hr))
-            time.sleep(wait)
+            self._pause_aware_sleep(wait)
 
         print("Selecting next brawler by sorting lowest trophies.")
         tap(128, 500, 1.4)   # left Brawlers button in lobby
@@ -409,13 +490,16 @@ class LobbyAutomation:
 
         print("Lowest-trophy brawler selection did not return to lobby; trying one recovery pass.")
         self.press_back()
-        time.sleep(0.8)
+        self._pause_aware_sleep(0.8)
         tap(260, 991, 1.0)   # Select again if the brawler details screen is still open
         return self.ensure_lobby_after_selection()
 
     def ensure_lobby_after_selection(self, timeout=6.0):
         deadline = time.time() + timeout
-        while time.time() < deadline:
+        attempts = 0
+        max_attempts = max(1, int(timeout / 0.7) + 1)
+        while time.time() < deadline and attempts < max_attempts:
+            attempts += 1
             try:
                 state = get_state(self.window_controller.screenshot())
             except Exception as e:
@@ -436,7 +520,7 @@ class LobbyAutomation:
                     f"{state}; stopping selection so it does not tap during a match."
                 )
                 return False
-            time.sleep(0.7)
+            self._pause_aware_sleep(0.7)
         return False
 
     def press_back(self):

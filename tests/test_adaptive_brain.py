@@ -2,7 +2,7 @@ import os
 import tempfile
 import unittest
 
-from adaptive_brain import AdaptiveBrain
+from game.adaptive_brain import AdaptiveBrain
 
 
 class AdaptiveBrainTests(unittest.TestCase):

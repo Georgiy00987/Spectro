@@ -183,7 +183,7 @@ if "--spectro-install" in sys.argv:
     sys.exit(0)
 
 setup(
-    name="Spectro", version="1.0.0",
+    name="Spectro", version="0.0.2",
     packages=find_packages(exclude=["api", "cfg", "models", "typization"]),
     install_requires=[]
 )

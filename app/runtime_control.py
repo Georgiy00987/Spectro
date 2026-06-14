@@ -7,6 +7,10 @@ import json
 import os
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 
 RUNNING = "running"
 PAUSED = "paused"
@@ -157,6 +161,9 @@ def format_uptime(seconds):
 def run_window(state_path):
     import tkinter as tk
     import customtkinter as ctk
+    from core.window_icon import set_window_icon, set_windows_app_id
+
+    set_windows_app_id("Spectro.ControlPanel")
 
     metrics_path = metrics_path_for(state_path)
     details_path = details_path_for(state_path)
@@ -182,6 +189,8 @@ def run_window(state_path):
     root.resizable(False, False)
     root.attributes("-topmost", True)
     root.configure(fg_color=BG)
+    set_window_icon(root)
+    root.after(100, lambda: set_window_icon(root))
 
     owner_pid = None
     try:
@@ -214,9 +223,6 @@ def run_window(state_path):
         write_state(state_path, STOP)
         root.destroy()
 
-        from main import main
-        main()
-
     def on_close():
         # Closing the window should not freeze the bot: fall back to running.
         write_state(state_path, RUNNING)
@@ -247,7 +253,7 @@ def run_window(state_path):
             return
         refresh()
         if root_exists():
-            root.after(500, refresh_loop)
+            root.after(100, refresh_loop)
 
     # --- Title (bot name) ---
     title = ctk.CTkLabel(root, text="Spectro", text_color=TEXT, font=("Arial", 18, "bold"))

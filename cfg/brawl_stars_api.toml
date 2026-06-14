@@ -1,6 +1,5 @@
-# Optional. Used for trophy autofill and Push All.
-# Create an API token in the Brawl Stars developer portal and allow your public IP.
+# Fill this file to import current brawler trophies from the official Brawl Stars API.
+# Create an API token at https://developer.brawlstars.com/ and allow your current public IP.
 
-api_token = ""
-player_tag = "#YOURTAG"
+player_tag = "#YOUR_TAG"
 timeout_seconds = 15

@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import cv2
 
-from state_finder import get_in_game_state, get_star_drop_type
+from vision.state_finder import get_in_game_state, get_star_drop_type
 
 
 class StarDropHandlingTests(unittest.TestCase):

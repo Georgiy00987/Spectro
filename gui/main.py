@@ -76,7 +76,10 @@ class App:
         self.login(self.set_is_logged)
         if self.logged_in:
             latest = spectro_version if api_base_url == "localhost" else get_latest_version()
-            self.hub_menu(spectro_version, latest, brawlers=self.brawlers)
+            hub = self.hub_menu(spectro_version, latest, brawlers=self.brawlers)
+            if not getattr(hub, "start_requested", False):
+                print("Spectro Hub was closed without Start; exiting.")
+                return
             utils.clear_toml_cache()
             self.brawler_data = utils.load_brawler_data()
             if self.brawler_data:

@@ -5,6 +5,36 @@ from copy import deepcopy
 from core.utils import load_toml_as_dict, save_dict_as_toml
 
 
+SCRCPY_CAPTURE_PROFILES = {
+    "balanced": {
+        "description": "Low-latency default: fresh frames with moderate bandwidth.",
+        "scrcpy_max_fps": 45,
+        "scrcpy_max_width": 960,
+        "scrcpy_bitrate": 2500000,
+    },
+    "fast": {
+        "description": "Maximum frame speed with lower capture resolution.",
+        "scrcpy_max_fps": 60,
+        "scrcpy_max_width": 854,
+        "scrcpy_bitrate": 1800000,
+    },
+    "stable": {
+        "description": "Safer mode for weak PCs or unstable emulator feeds.",
+        "scrcpy_max_fps": 30,
+        "scrcpy_max_width": 960,
+        "scrcpy_bitrate": 2000000,
+    },
+    "quality": {
+        "description": "Sharper capture for strong PCs.",
+        "scrcpy_max_fps": 60,
+        "scrcpy_max_width": 1280,
+        "scrcpy_bitrate": 5000000,
+    },
+}
+
+SCRCPY_CAPTURE_KEYS = ("scrcpy_max_fps", "scrcpy_max_width", "scrcpy_bitrate")
+
+
 PERFORMANCE_PROFILES = {
     "balanced": {
         "description": "Good default for most PCs: uncapped bot loop with a 60 FPS emulator feed.",
@@ -55,6 +85,46 @@ PERFORMANCE_PROFILES = {
         },
     },
 }
+
+
+def normalize_scrcpy_capture_profile_name(profile_name: str) -> str:
+    return str(profile_name or "balanced").strip().lower().replace("-", "_")
+
+
+def detect_scrcpy_capture_profile(config: dict) -> str:
+    for profile_name, profile in SCRCPY_CAPTURE_PROFILES.items():
+        try:
+            if all(int(config.get(key)) == int(profile[key]) for key in SCRCPY_CAPTURE_KEYS):
+                return profile_name
+        except (TypeError, ValueError):
+            continue
+    return "custom"
+
+
+def apply_scrcpy_capture_profile(
+    profile_name: str = "balanced",
+    general_config_path: str = "cfg/general_config.toml",
+    save: bool = True,
+) -> dict:
+    profile_key = normalize_scrcpy_capture_profile_name(profile_name)
+    if profile_key not in SCRCPY_CAPTURE_PROFILES:
+        available = ", ".join(sorted(SCRCPY_CAPTURE_PROFILES))
+        raise ValueError(f"Unknown scrcpy capture profile '{profile_name}'. Available profiles: {available}")
+
+    profile = SCRCPY_CAPTURE_PROFILES[profile_key]
+    general_config = deepcopy(load_toml_as_dict(general_config_path))
+    for key in SCRCPY_CAPTURE_KEYS:
+        general_config[key] = profile[key]
+
+    if save:
+        save_dict_as_toml(general_config, general_config_path)
+
+    return {
+        "profile": profile_key,
+        "description": profile["description"],
+        "general_config": general_config,
+        "changed_general_keys": list(SCRCPY_CAPTURE_KEYS),
+    }
 
 
 def apply_performance_profile(

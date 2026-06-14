@@ -19,7 +19,7 @@ from vision.state_finder import (
 )
 from game.trophy_observer import TrophyObserver
 from core.utils import find_template_center, load_toml_as_dict, async_notify_user, \
-    save_brawler_data, extract_text_strings, load_brawl_stars_api_config, fetch_brawl_stars_player, fetch_brawl_stars_player_by_tag, normalize_brawler_name
+    save_brawler_data, extract_text_strings, load_brawl_stars_api_config, fetch_brawl_stars_player, fetch_brawl_stars_player_by_tag, normalize_brawler_name, config_bool
 from game.adaptive_brain import AdaptiveBrain
 
 debug = load_toml_as_dict("cfg/general_config.toml")['super_debug'] == "yes"
@@ -53,7 +53,7 @@ class StageManager:
         brawler_list = [brawler["brawler"] for brawler in brawlers_data]
         self.Trophy_observer = TrophyObserver(brawler_list)
         bot_config = load_toml_as_dict("cfg/bot_config.toml")
-        adaptive_enabled = str(bot_config.get("adaptive_brain_enabled", "yes")).lower() in ("yes", "true", "1")
+        adaptive_enabled = config_bool(bot_config.get("adaptive_brain_enabled"), True)
         adaptive_window = int(bot_config.get("adaptive_brain_window", 20))
         self.adaptive_brain = AdaptiveBrain(enabled=adaptive_enabled, window_size=adaptive_window)
         print(self.adaptive_brain.summary())
@@ -65,6 +65,7 @@ class StageManager:
         self.last_recorded_result = None
         self.active_end_result = None
         self.last_team_invite_reject_time = 0.0
+        self.last_shop_exit_time = 0.0
         self.stop_after_post_match_rewards = False
         self.completion_notification_sent = False
         self.api_selection_checks_remaining = 3
@@ -92,6 +93,20 @@ class StageManager:
             'trophy_reward': lambda: self.window_controller.press_key("Q"),
             'you_got': self.handle_you_got,
         }
+
+    def _pause_aware_sleep(self, duration):
+        sleeper = getattr(self.window_controller, "pause_aware_sleep", None)
+        if callable(sleeper):
+            return sleeper(duration)
+        time.sleep(duration)
+        return True
+
+    def _pause_requested(self):
+        checker = getattr(self.window_controller, "is_pause_requested", None)
+        try:
+            return bool(checker and checker())
+        except Exception:
+            return False
 
     def send_webhook_notification(self, event_type, screenshot=None, details=None):
         loop = asyncio.new_event_loop()
@@ -216,6 +231,11 @@ class StageManager:
             row.get("trophies", 0),
         )
 
+    @staticmethod
+    def _short_error(error):
+        text = str(error).replace("\n", " | ")
+        return text[:240] + ("..." if len(text) > 240 else "")
+
     def api_trophies_for_brawler(self, player_data, brawler_name):
         wanted_key = normalize_brawler_name(brawler_name)
         for brawler in player_data.get("brawlers", []):
@@ -241,7 +261,7 @@ class StageManager:
                 current_trophies=self.current_brawler_trophies_for_api(),
             )
         except Exception as e:
-            print(f"Could not read current brawler trophies from API during {reason}; using local trophies. {e}")
+            print(f"Could not read current brawler trophies from API during {reason}; using local trophies. {self._short_error(e)}")
             return None
         api_trophies = self.api_trophies_for_brawler(player_data, current_name)
         if api_trophies is None:
@@ -369,7 +389,7 @@ class StageManager:
             )
         except RuntimeError as e:
             if "accessDenied" not in str(e):
-                print(f"Push All API trophy refresh failed; using local trophies. {e}")
+                print(f"Push All API trophy refresh failed; using local trophies. {self._short_error(e)}")
                 return False
             try:
                 print("Push All API token was rejected; refreshing token for current public IP and retrying.")
@@ -378,7 +398,7 @@ class StageManager:
                     current_trophies=self.current_brawler_trophies_for_api(),
                 )
             except Exception as retry_error:
-                print(f"Push All API trophy refresh failed after token refresh; using local trophies. {retry_error}")
+                print(f"Push All API trophy refresh failed after token refresh; using local trophies. {self._short_error(retry_error)}")
                 return False
         except Exception as e:
             print(f"Push All API trophy refresh failed; using local trophies. {e}")
@@ -498,7 +518,7 @@ class StageManager:
         )
 
     def start_game(self):
-        print("state is lobby, starting game")
+        print("Lobby detected; preparing to start match.")
         if getattr(self, "stop_after_post_match_rewards", False):
             print("Post-match rewards cleared; stopping after completed target.")
             if os.path.exists("cfg/latest_brawler_data.json"):
@@ -582,7 +602,7 @@ class StageManager:
                 while current_state != "lobby" and attempts < max_attempts:
                     self.window_controller.press_key("Q")
                     print("Pressed Q to return to lobby")
-                    time.sleep(1)
+                    self._pause_aware_sleep(1)
                     screenshot = self.window_controller.screenshot()
                     current_state = get_state(screenshot)
                     attempts += 1
@@ -626,6 +646,16 @@ class StageManager:
                 self.window_controller.keys_up(list("wasd"))
                 return
             self.force_reselect_current_brawler = False
+            self._pause_aware_sleep(0.35)
+            post_select_state = get_state(self.window_controller.screenshot())
+            if post_select_state == "shop":
+                print("Brawler reselection opened shop; closing it before starting match.")
+                self.quit_shop()
+                return
+            if post_select_state != "lobby":
+                print(f"Brawler reselection ended in {post_select_state}; delaying match start until lobby is visible.")
+                self.window_controller.stop_gameplay_controls()
+                return
 
         # Final lobby sync: right before pressing Q, parse trophies from Brawltracker.
         # If Brawltracker is unavailable, keep the locally calculated value as plan B.
@@ -639,8 +669,18 @@ class StageManager:
                     self.start_game()
                     return
 
+        current_start_state = get_state(self.window_controller.screenshot())
+        if current_start_state == "shop":
+            print("Shop detected before match start; closing it instead of pressing Start/Q.")
+            self.quit_shop()
+            return
+        if current_start_state != "lobby":
+            print(f"Not starting match because current state is {current_start_state}, not lobby.")
+            self.window_controller.stop_gameplay_controls()
+            return
+
         # q btn is over the start btn
-        self.window_controller.keys_up(list("wasd"))
+        self.window_controller.stop_gameplay_controls()
         self.window_controller.press_key("Q")
         print("Pressed Q to start a match")
 
@@ -718,6 +758,40 @@ class StageManager:
         _, bx, by, bw, bh = max(candidates, key=lambda item: item[0])
         return int(x0 + bx + bw / 2), int(y0 + by + bh / 2)
 
+    def lobby_config_value(self, key, default=None):
+        if key in self.lobby_config:
+            return self.lobby_config.get(key, default)
+        for value in self.lobby_config.values():
+            if isinstance(value, dict) and key in value:
+                return value.get(key, default)
+        return default
+
+    def click_end_screen_exit_button(self, screenshot=None, log=True):
+        """Leave the result screen without pressing Play Again.
+
+        Play Again has a separate configured coordinate. When the feature is
+        disabled, use the left/lower Exit/Continue button instead of Q, because
+        Q may overlap Play Again on some key layouts.
+        """
+        if screenshot is None:
+            try:
+                screenshot = self.window_controller.screenshot()
+            except Exception:
+                screenshot = None
+        x = int(float(self.lobby_config_value("end_screen_exit_x", 1690)))
+        y = int(float(self.lobby_config_value("end_screen_exit_y", 990)))
+        wait_seconds = self._number_or_default(self.lobby_config_value("end_screen_exit_wait_seconds", 0.35), 0.35)
+        post_click_wait = self._number_or_default(self.lobby_config_value("end_screen_exit_post_click_wait_seconds", 3.0), 3.0)
+        if wait_seconds > 0:
+            self._pause_aware_sleep(wait_seconds)
+        self.window_controller.stop_gameplay_controls()
+        self.window_controller.click(x, y, delay=0.08, already_include_ratio=False)
+        self.tap_with_adb_fallback(x, y, screenshot_shape=(screenshot.shape if screenshot is not None else (1080, 1920, 3)))
+        if log:
+            print(f"Clicked end-screen Exit/Continue coordinates: {x},{y}. Waiting {post_click_wait:.1f}s for post-match transition.")
+            if post_click_wait > 0:
+                self._pause_aware_sleep(post_click_wait)
+
     def click_play_again_button(self, screenshot=None):
         """Use the mapped R action for Play Again instead of coordinate clicks.
 
@@ -726,14 +800,14 @@ class StageManager:
         Play Again button by coordinates, because the button position changes
         across result/reward screens and caused missed clicks.
         """
-        wait_seconds = self._number_or_default(self.lobby_config.get("play_again_wait_seconds", 5), 5)
+        wait_seconds = self._number_or_default(self.lobby_config_value("play_again_wait_seconds", 5), 5)
         if wait_seconds > 0:
             print(f"Waiting {wait_seconds:.1f}s before Play Again/Continue.")
-            time.sleep(wait_seconds)
+            self._pause_aware_sleep(wait_seconds)
 
         self.window_controller.keys_up(list("wasd"))
-        configured_x = self.lobby_config.get("play_again_x", None)
-        configured_y = self.lobby_config.get("play_again_y", None)
+        configured_x = self.lobby_config_value("play_again_x", None)
+        configured_y = self.lobby_config_value("play_again_y", None)
         try:
             if configured_x is not None and configured_y is not None:
                 x = int(float(configured_x))
@@ -784,7 +858,7 @@ class StageManager:
             else:
                 self.click_play_again_button(screenshot)
 
-            time.sleep(max(0.45, self.end_screen_dismiss_delay))
+            self._pause_aware_sleep(max(0.45, self.end_screen_dismiss_delay))
             current_state = None
 
         print(f"Play Again flow timed out in state: {current_state}. Normal state loop will continue.")
@@ -855,7 +929,7 @@ class StageManager:
         attempts = 0
         while current_state != "lobby" and attempts < max_attempts:
             self.window_controller.press_key("Q")
-            time.sleep(1.0)
+            self._pause_aware_sleep(1.0)
             screenshot = self.window_controller.screenshot()
             current_state = get_state(screenshot)
             attempts += 1
@@ -878,11 +952,11 @@ class StageManager:
         if drop_type in ("angelic", "demonic"):
             for _ in range(3):
                 self.window_controller.click(x, y, delay=0.45)
-                time.sleep(0.2)
+                self._pause_aware_sleep(0.2)
         else:
             for _ in range(5):
                 self.window_controller.click(x, y, delay=0.04)
-                time.sleep(0.08)
+                self._pause_aware_sleep(0.08)
 
     def handle_you_got(self):
         # "YOU GOT: ..." reward overlays are dismissed by tapping anywhere.
@@ -892,9 +966,9 @@ class StageManager:
         hr = self.window_controller.height_ratio
         print("YOU GOT reward screen detected; dismissing.")
         #self.window_controller.click(int(965 * wr), int(525 * hr), delay=0.05)
-        time.sleep(0.2)
+        self._pause_aware_sleep(0.2)
         self.window_controller.press_key("F")
-        time.sleep(0.2)
+        self._pause_aware_sleep(0.2)
 
     def handle_prestige_reward(self):
         screenshot = self.window_controller.screenshot()
@@ -907,7 +981,7 @@ class StageManager:
         print("Prestige reward screen detected; clicking NEXT.")
         self.window_controller.keys_up(list("wasd"))
         self.window_controller.click(*next_button_center)
-        time.sleep(1.0)
+        self._pause_aware_sleep(1.0)
 
         lobby_screenshot = self.wait_for_lobby_after_reward()
         if lobby_screenshot is None:
@@ -953,6 +1027,23 @@ class StageManager:
             found_game_result = current_result
             print(f"end_game: re-entry on '{current_state}', skipping trophy update")
 
+        # Dismiss non-Play-Again end screens immediately.
+        # API trophy checks and webhook sending can take a few seconds, and previously
+        # the bot waited for those tasks before pressing the result-screen button.
+        # This made the bot sit on end_victory/end_defeat for too long.
+        immediate_dismiss_sent = False
+        end_dismiss_press_count = 0
+        last_end_dismiss_press_time = 0.0
+        if current_result is not None:
+            play_again_possible = self.play_again_on_win_enabled() and self.is_win_result(current_result)
+            if not play_again_possible:
+                self.click_end_screen_exit_button()
+                immediate_dismiss_sent = True
+                end_dismiss_press_count = 1
+                last_end_dismiss_press_time = time.time()
+                button_pressed = True
+                print(f"End screen {current_state} detected; clicked Exit/Continue immediately while processing stats.")
+
         while current_state.startswith("end") and time.time() - end_screen_time < 25:
             if not stats_recorded:
                 found_game_result = current_state.split("_")[1]
@@ -964,6 +1055,7 @@ class StageManager:
                 parsed_trophies = None
                 expected_trophies = None
                 old_trophies = self.Trophy_observer.current_trophies
+                trophies_unchanged_after_win = False
                 if type_to_push == "trophies":
                     expected_trophies = self.estimate_trophies_after_result(found_game_result)
                     # Read the API value only for verification. Do NOT assign it before
@@ -976,10 +1068,19 @@ class StageManager:
                 if type_to_push == "trophies" and parsed_trophies is not None:
                     local_after = self.Trophy_observer.current_trophies
                     if parsed_trophies == old_trophies:
-                        print(
-                            f"Brawltracker trophies are still stale after match: "
-                            f"{old_trophies} -> {parsed_trophies}. Keeping local result {local_after}."
-                        )
+                        if self.is_win_result(found_game_result) and local_after == old_trophies:
+                            trophies_unchanged_after_win = True
+                            self.force_reselect_current_brawler = True
+                            print(
+                                f"Win was detected, but local and API trophies did not change: "
+                                f"{old_trophies} -> {parsed_trophies}. "
+                                "Forcing brawler reselection before the next match."
+                            )
+                        else:
+                            print(
+                                f"Brawltracker trophies are still stale after match: "
+                                f"{old_trophies} -> {parsed_trophies}. Keeping local result {local_after}."
+                            )
                     elif parsed_trophies == local_after:
                         print(f"Brawltracker trophy verification passed: {old_trophies} -> {parsed_trophies}.")
                     else:
@@ -1050,7 +1151,10 @@ class StageManager:
                             )
                             self.completion_notification_sent = True
 
-                if self.should_use_play_again_after_match(
+                if trophies_unchanged_after_win:
+                    play_again_requested = False
+                    print("Play Again skipped because trophies did not change after a win; returning to lobby to reselect brawler.")
+                elif self.should_use_play_again_after_match(
                     found_game_result,
                     type_to_push,
                     value,
@@ -1066,10 +1170,28 @@ class StageManager:
             if play_again_requested:
                 self.click_play_again_button(screenshot)
             else:
-                self.window_controller.press_key("Q")
-            button_pressed = True
+                now = time.time()
+                # Some result screens need two or more Q presses: one to clear the
+                # result banner and another to close the following reward/continue
+                # layer. Keep pressing Q at a controlled interval while the state is
+                # still end_*, instead of pressing once and waiting up to 25 seconds.
+                if (not immediate_dismiss_sent) or (
+                    end_dismiss_press_count < 6
+                    and now - last_end_dismiss_press_time >= max(0.35, self.end_screen_dismiss_delay)
+                ):
+                    self.click_end_screen_exit_button(screenshot, log=False)
+                    end_dismiss_press_count += 1
+                    last_end_dismiss_press_time = now
+                    button_pressed = True
+                    immediate_dismiss_sent = True
+                    if end_dismiss_press_count == 1:
+                        print("Dismissing end screen with configured Exit/Continue button.")
+                    elif end_dismiss_press_count == 6:
+                        print("End screen still visible after 6 dismiss attempts.")
+                else:
+                    self.window_controller.stop_gameplay_controls()
 
-            time.sleep(self.end_screen_dismiss_delay)
+            self._pause_aware_sleep(self.end_screen_dismiss_delay)
             screenshot = self.window_controller.screenshot()
             current_state = get_state(screenshot)
             if play_again_requested and not current_state.startswith("end"):
@@ -1080,10 +1202,36 @@ class StageManager:
             self.continue_play_again_flow(initial_state=current_state)
             return
 
-        print("Game has ended", current_state)
+        if current_state == "match":
+            print("Game result dismissed; waiting for post-match transition.")
+        else:
+            print("Game has ended", current_state)
 
     def quit_shop(self):
-        self.window_controller.click(100*self.window_controller.width_ratio, 60*self.window_controller.height_ratio)
+        now = time.time()
+        if now - getattr(self, "last_shop_exit_time", 0.0) < 0.8:
+            return
+        self.last_shop_exit_time = now
+        self.window_controller.stop_gameplay_controls()
+        print("Shop detected; closing shop/back screen.")
+
+        # Android back is the safest way to leave shop-like screens across
+        # emulator profiles. Keep coordinate fallbacks for layouts where back is
+        # intercepted or unavailable.
+        try:
+            device = getattr(self.window_controller, "device", None)
+            if device is not None:
+                device.shell("input keyevent 4")
+                self._pause_aware_sleep(0.15)
+        except Exception as exc:
+            print(f"Android BACK failed while closing shop: {exc}")
+
+        # Fallbacks: upper-left back button and upper-right close button zones.
+        try:
+            self.window_controller.click(100 * self.window_controller.width_ratio, 60 * self.window_controller.height_ratio, delay=0.05)
+            self.window_controller.click(1840 * self.window_controller.width_ratio, 80 * self.window_controller.height_ratio, delay=0.05)
+        except Exception as exc:
+            print(f"Coordinate fallback failed while closing shop: {exc}")
 
     def close_pop_up(self):
         screenshot = self.window_controller.screenshot()
@@ -1122,6 +1270,8 @@ class StageManager:
             self.window_controller.click(*popup_location)
 
     def tap_with_adb_fallback(self, x, y, screenshot_shape=None):
+        if self._pause_requested():
+            return False
         try:
             device = getattr(self.window_controller, "device", None)
             if device is None:
@@ -1140,6 +1290,8 @@ class StageManager:
             return False
 
     def do_state(self, state, data=None):
+        if self._pause_requested():
+            return
         if not str(state).startswith("end"):
             self.active_end_result = None
         if data is not None:

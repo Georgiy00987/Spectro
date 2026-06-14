@@ -3,9 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.pyd
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
+*.pyo
 
 # Virtual environments
 .venv/
@@ -13,34 +11,41 @@ venv/
 env/
 ENV/
 
-# IDE
+# IDE / OS
 .idea/
 .vscode/
+.DS_Store
+Thumbs.db
 
 # Build artifacts
 build/
 dist/
 *.spec
 *.egg-info/
-*.exe
+
+# Local generated binaries / archives
+setup.exe
+updater.exe
 *.zip
 
 # Runtime logs and generated data
 logs/
 debug_frames/
-datasets/
 runs/
+datasets/
 *.log
-startup_crash.log
 
-# User/runtime state
-cfg/latest_brawler_data.json
+# Local config/runtime state
+cfg/match_history.toml
+cfg/adaptive_state.json
+cfg/backups/
+cfg/defaults/
+latest_brawler_data.json
 
-# Local secrets, keep committed configs sanitized
-*.local.toml
-.env
-.env.*
+# Local launchers / scratch files
+start.bat
+test.py
 
-# OS
-Thumbs.db
-.DS_Store
+# Model backups
+*.onnx.bak
+cfg/brawltracker_cache.json

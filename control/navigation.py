@@ -155,16 +155,13 @@ class GridNavigator:
                     heapq.heappush(open_heap, (ng + h(ni, nj), nxt))
         return None
 
-    def next_heading(self, player_pos, target_pos, walls, los_padding=28.0):
-        """Return a heading angle (deg) toward the target along an A* route,
-        with string-pulling. None if no route (caller should fall back)."""
-        cells = self.find_path_cells(player_pos, target_pos, walls)
+    def _path_to_heading(self, player_pos, cells, walls, los_padding=28.0):
         if not cells or len(cells) < 2:
             return None
         px, py = player_pos
         cell = self.cell
         pts = [(px + i*cell, py + j*cell) for (i, j) in cells]
-        # String-pull: farthest waypoint reachable by clear straight line
+        # String-pull: farthest waypoint reachable by clear straight line.
         chosen = pts[1]
         for pt in reversed(pts[1:]):
             if not segment_blocked(player_pos, pt, walls, padding=los_padding):
@@ -174,3 +171,138 @@ class GridNavigator:
         if dx == 0 and dy == 0:
             return None
         return math.degrees(math.atan2(dy, dx)) % 360
+
+    def next_heading(self, player_pos, target_pos, walls, los_padding=28.0):
+        """Return a heading angle (deg) toward the target along an A* route,
+        with string-pulling. None if no route (caller should fall back)."""
+        cells = self.find_path_cells(player_pos, target_pos, walls)
+        return self._path_to_heading(player_pos, cells, walls, los_padding=los_padding)
+
+    def find_upward_path_cells(self, player_pos, walls, min_progress_cells=None):
+        """Find a local route whose goal is upward progress, not a fixed point.
+
+        This is used when no enemy is visible. A fixed target directly above the
+        player can make the bot hold the joystick straight up until it touches a
+        wall. Here we search the whole local grid and pick the reachable cell
+        with the best upward progress, then the smallest side drift and route
+        length. The resulting path can start with a diagonal or side step to go
+        around walls before colliding with them.
+        """
+        R, cell = self.R, self.cell
+        px, py = player_pos
+        infl = [(w[0]-self.inflate, w[1]-self.inflate, w[2]+self.inflate, w[3]+self.inflate) for w in (walls or [])]
+
+        def world(i, j):
+            return (px + i*cell, py + j*cell)
+
+        def blocked(i, j):
+            cx, cy = world(i, j)
+            return self._cell_blocked(cx, cy, infl)
+
+        start = (0, 0)
+        if blocked(*start):
+            return None
+
+        neighbors = [
+            (0,-1,1.0), (-1,-1,_SQRT2), (1,-1,_SQRT2),
+            (-1,0,1.0), (1,0,1.0),
+            (0,1,1.0), (-1,1,_SQRT2), (1,1,_SQRT2),
+        ]
+        open_heap = [(0.0, start)]
+        gscore = {start: 0.0}
+        came = {}
+        closed = set()
+
+        while open_heap:
+            _, cur = heapq.heappop(open_heap)
+            if cur in closed:
+                continue
+            closed.add(cur)
+            ci, cj = cur
+            for di, dj, cost in neighbors:
+                ni, nj = ci+di, cj+dj
+                if abs(ni) > R or abs(nj) > R:
+                    continue
+                if blocked(ni, nj):
+                    continue
+                if di != 0 and dj != 0:
+                    # no corner cutting
+                    if blocked(ci+di, cj) or blocked(ci, cj+dj):
+                        continue
+                ng = gscore[cur] + cost
+                nxt = (ni, nj)
+                if ng < gscore.get(nxt, 1e18):
+                    gscore[nxt] = ng
+                    came[nxt] = cur
+                    # Strongly prefer upward cells, but keep Dijkstra-like cost.
+                    priority = ng + max(0, nj) * 4.0 + abs(ni) * 0.02
+                    heapq.heappush(open_heap, (priority, nxt))
+
+        if len(closed) <= 1:
+            return None
+
+        if min_progress_cells is None:
+            min_progress_cells = max(2, int(R * 0.45))
+        min_progress_cells = max(1, min(R, int(min_progress_cells)))
+
+        candidates = []
+        for i, j in closed:
+            progress = -j
+            if progress <= 0:
+                continue
+            candidates.append((i, j, progress, gscore.get((i, j), 1e18)))
+        if not candidates:
+            return None
+
+        # Prefer cells that reach at least the requested upward progress. If the
+        # route is heavily blocked, still take the best available upward cell.
+        strong = [c for c in candidates if c[2] >= min_progress_cells]
+        pool = strong or candidates
+        best_i, best_j, _, _ = min(
+            pool,
+            key=lambda c: (
+                -c[2],          # more upward progress first
+                abs(c[0]),      # less side drift second
+                c[3],           # shorter route third
+            ),
+        )
+
+        cur = (best_i, best_j)
+        path = [cur]
+        while cur in came:
+            cur = came[cur]
+            path.append(cur)
+        path.reverse()
+        return path
+
+    def next_upward_heading(self, player_pos, walls, los_padding=28.0, min_progress_cells=None):
+        """Return a heading for wall-aware upward roaming.
+
+        If the player is already touching a wall, the current point can be
+        inside the inflated wall area. In that case retry with smaller inflation
+        so the pathfinder can produce an escape step instead of returning None.
+        """
+        cells = self.find_upward_path_cells(player_pos, walls, min_progress_cells=min_progress_cells)
+        heading = self._path_to_heading(player_pos, cells, walls, los_padding=los_padding)
+        if heading is not None:
+            return heading
+
+        if not walls or self.inflate <= 0:
+            return None
+
+        original_inflate = self.inflate
+        try:
+            for factor in (0.5, 0.25, 0.0):
+                self.inflate = original_inflate * factor
+                cells = self.find_upward_path_cells(player_pos, walls, min_progress_cells=min_progress_cells)
+                heading = self._path_to_heading(
+                    player_pos,
+                    cells,
+                    walls,
+                    los_padding=min(float(los_padding), max(0.0, self.inflate)),
+                )
+                if heading is not None:
+                    return heading
+        finally:
+            self.inflate = original_inflate
+        return None

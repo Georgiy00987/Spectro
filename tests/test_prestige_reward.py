@@ -1,11 +1,11 @@
-import unittest
+﻿import unittest
 from unittest.mock import patch
 
 import cv2
 import numpy as np
 
-from stage_manager import StageManager
-from state_finder import (
+from game.stage_manager import StageManager
+from vision.state_finder import (
     get_prestige_next_button_center,
     get_team_invite_reject_button_center,
     is_in_prestige_reward,
@@ -156,9 +156,9 @@ class PrestigeRewardTests(unittest.TestCase):
         self.draw_prestige_screen(screenshot_bgr, button_box=(1140, 840, 280, 105))
         manager.window_controller.screenshot = lambda: cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2RGB)
 
-        with patch("stage_manager.get_state", return_value="lobby"), \
+        with patch("game.stage_manager.get_state", return_value="lobby"), \
                 patch.object(manager, "read_lobby_trophies_from_screenshot", return_value=0), \
-                patch("stage_manager.save_brawler_data"):
+                patch("game.stage_manager.save_brawler_data"):
             manager.handle_prestige_reward()
 
         self.assertEqual(manager.brawlers_pick_data[0]["brawler"], "shelly")
@@ -179,9 +179,9 @@ class PrestigeRewardTests(unittest.TestCase):
         self.draw_prestige_screen(screenshot_bgr, button_box=(1140, 840, 280, 105))
         manager.window_controller.screenshot = lambda: cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2RGB)
 
-        with patch("stage_manager.get_state", return_value="lobby"), \
+        with patch("game.stage_manager.get_state", return_value="lobby"), \
                 patch.object(manager, "read_lobby_trophies_from_screenshot", return_value=250), \
-                patch("stage_manager.save_brawler_data"):
+                patch("game.stage_manager.save_brawler_data"):
             manager.handle_prestige_reward()
 
         self.assertEqual(manager.brawlers_pick_data[0]["brawler"], "gray")
@@ -202,9 +202,9 @@ class PrestigeRewardTests(unittest.TestCase):
         self.draw_prestige_screen(screenshot_bgr, button_box=(1140, 840, 280, 105))
         manager.window_controller.screenshot = lambda: cv2.cvtColor(screenshot_bgr, cv2.COLOR_BGR2RGB)
 
-        with patch("stage_manager.get_state", return_value="lobby"), \
+        with patch("game.stage_manager.get_state", return_value="lobby"), \
                 patch.object(manager, "read_lobby_trophies_from_screenshot", return_value=None), \
-                patch("stage_manager.save_brawler_data"):
+                patch("game.stage_manager.save_brawler_data"):
             manager.handle_prestige_reward()
 
         self.assertTrue(manager.stop_after_post_match_rewards)

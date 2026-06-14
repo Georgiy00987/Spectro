@@ -21,6 +21,10 @@ hypercharge=[1350, 940, 1450, 1050]
 
 
 # Play Again / Continue button coordinates in 1920x1080 game coordinates.
-play_again_wait_seconds = 5
+play_again_wait_seconds = 2.5
 play_again_x = 1275
 play_again_y = 1000
+end_screen_exit_x = 1690
+end_screen_exit_y = 990
+end_screen_exit_wait_seconds = 0.35
+end_screen_exit_post_click_wait_seconds = 1.5

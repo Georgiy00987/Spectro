@@ -99,17 +99,14 @@ def find_game_result(screenshot):
 
     is_victory = is_template_in_region(screenshot, end_results_path + 'victory.png', crop_region)
     if is_victory:
-        print("Victory!")
         return "victory"
 
     is_defeat = is_template_in_region(screenshot, end_results_path + 'defeat.png', crop_region)
     if is_defeat:
-        print("Defeat :(")
         return "defeat"
 
     is_draw = is_template_in_region(screenshot, end_results_path + 'draw.png', crop_region)
     if is_draw:
-        print("Draw.")
         return "draw"
     return False
 
@@ -211,11 +208,29 @@ def get_continue_button_center(image, image_is_rgb=False):
     h, w = image.shape[:2]
     if h == 0 or w == 0:
         return None
+    conv = cv2.COLOR_RGB2HSV if image_is_rgb else cv2.COLOR_BGR2HSV
+
+    # Guard against false positives during match gameplay. The real new-content
+    # popup has a large blue/purple modal/background in the middle of the screen,
+    # while gameplay can have green/white controls in the lower action area that
+    # look like CONTINUE/EQUIP buttons.
+    modal = image[int(h * 0.10):int(h * 0.72), int(w * 0.12):int(w * 0.88)]
+    if modal.size == 0:
+        return None
+    modal_hsv = cv2.cvtColor(modal, conv)
+    blue = cv2.inRange(modal_hsv, np.array((88, 45, 45), np.uint8), np.array((130, 255, 255), np.uint8))
+    purple = cv2.inRange(modal_hsv, np.array((130, 35, 45), np.uint8), np.array((165, 255, 255), np.uint8))
+    bright = cv2.inRange(modal_hsv, np.array((0, 0, 130), np.uint8), np.array((179, 95, 255), np.uint8))
+    modal_area = max(1, modal.shape[0] * modal.shape[1])
+    modal_color_ratio = (cv2.countNonZero(blue) + cv2.countNonZero(purple)) / modal_area
+    modal_text_ratio = cv2.countNonZero(bright) / modal_area
+    if modal_color_ratio < 0.16 or modal_text_ratio < 0.004:
+        return None
+
     ry0 = int(h * 0.72)
     crop = image[ry0:h, 0:w]
     if crop.size == 0:
         return None
-    conv = cv2.COLOR_RGB2HSV if image_is_rgb else cv2.COLOR_BGR2HSV
     hsv = cv2.cvtColor(crop, conv)
     ch, cw = crop.shape[:2]
     min_area = max(250, ch * cw * 0.008)
@@ -232,7 +247,9 @@ def get_continue_button_center(image, image_is_rgb=False):
             continue
         if a / max(1, bw * bh) < 0.55:
             continue
-        if bx + bw / 2 <= cw * 0.55:
+        if bx + bw / 2 <= cw * 0.58:
+            continue
+        if by + bh / 2 < ch * 0.22 or by + bh / 2 > ch * 0.86:
             continue
         if cv2.countNonZero(white[by:by + bh, bx:bx + bw]) / max(1, bw * bh) < 0.04:
             continue

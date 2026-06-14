@@ -1,5 +1,20 @@
+# Text normalization
 * text=auto
 *.py text eol=lf
-*.toml text eol=lf
 *.md text eol=lf
-*.bat text eol=crlf
+*.toml text eol=lf
+*.json text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary assets
+*.ico binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.onnx binary
+*.pt binary
+*.npz binary
+*.exe binary
+*.dll binary

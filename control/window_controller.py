@@ -389,6 +389,10 @@ class WindowController:
         self.are_we_moving = False
         self.PID_JOYSTICK = 1  # ID for WASD movement
         self.PID_ATTACK = 2  # ID for clicks/attacks
+        self.attack_touch_active = False
+        self.last_attack_touch_pos = (None, None)
+        self.pause_checker = None
+        self._pause_release_in_progress = False
         self.check_if_brawl_stars_crashed_timer = load_toml_as_dict("cfg/time_tresholds.toml")["check_if_brawl_stars_crashed"]
         self.time_since_checked_if_brawl_stars_crashed = time.time()
         self.foreground_check_failures = 0
@@ -1074,14 +1078,53 @@ class WindowController:
             self.scale_factor = min(self.width_ratio, self.height_ratio)
 
         return frame
+
+    def set_pause_checker(self, checker):
+        """Install a callable used to interrupt bot inputs immediately on pause."""
+        self.pause_checker = checker
+
+    def is_pause_requested(self):
+        try:
+            return bool(self.pause_checker and self.pause_checker())
+        except Exception:
+            return False
+
+    def _abort_if_paused(self):
+        if not self.is_pause_requested():
+            return False
+        if not self._pause_release_in_progress:
+            self._pause_release_in_progress = True
+            try:
+                self.stop_gameplay_controls()
+            finally:
+                self._pause_release_in_progress = False
+        return True
+
+    def pause_aware_sleep(self, duration, check_interval=0.02):
+        """Sleep in small chunks and abort early if pause is requested."""
+        end_at = time.time() + max(0.0, float(duration or 0))
+        while time.time() < end_at:
+            if self._abort_if_paused():
+                return False
+            time.sleep(min(check_interval, max(0.0, end_at - time.time())))
+        return not self._abort_if_paused()
+
     def touch_down(self, x, y, pointer_id=0):
         # We explicitly pass the pointer_id
+        if pointer_id == getattr(self, "PID_ATTACK", None):
+            self.attack_touch_active = True
+            self.last_attack_touch_pos = (int(x), int(y))
         self.scrcpy_client.control.touch(int(x), int(y), scrcpy.ACTION_DOWN, pointer_id)
 
     def touch_move(self, x, y, pointer_id=0):
+        if pointer_id == getattr(self, "PID_ATTACK", None):
+            self.last_attack_touch_pos = (int(x), int(y))
         self.scrcpy_client.control.touch(int(x), int(y), scrcpy.ACTION_MOVE, pointer_id)
 
     def touch_up(self, x, y, pointer_id=0):
+        if pointer_id == getattr(self, "PID_ATTACK", None):
+            self.attack_touch_active = False
+            self.last_attack_touch_pos = (int(x), int(y))
         self.scrcpy_client.control.touch(int(x), int(y), scrcpy.ACTION_UP, pointer_id)
 
     def move_joystick_angle(self, angle_degrees: float, radius: float = 150.0):
@@ -1090,6 +1133,8 @@ class WindowController:
         0° = right, 90° = down, 180° = left, 270° = up (screen coordinates).
         radius controls how far from center the touch point is placed.
         """
+        if self._abort_if_paused():
+            return False
         angle_rad = math.radians(angle_degrees)
         scaled_radius = radius * self.scale_factor
         target_x = self.joystick_x + math.cos(angle_rad) * scaled_radius
@@ -1120,11 +1165,33 @@ class WindowController:
             self.last_joystick_down_time = 0.0
             self.last_joystick_pos = (None, None)
 
+    def stop_attack_touch(self):
+        """Release any held attack/action pointer used by attacks, gadgets and clicks."""
+        if not getattr(self, "attack_touch_active", False):
+            return
+        x, y = getattr(self, "last_attack_touch_pos", (None, None))
+        if x is None or y is None:
+            x, y = key_coords_dict.get("M", (brawl_stars_width // 2, brawl_stars_height // 2))
+            x = int(x * (self.width_ratio or 1))
+            y = int(y * (self.height_ratio or 1))
+        try:
+            self.touch_up(x, y, pointer_id=self.PID_ATTACK)
+        except Exception as e:
+            print(f"Could not release attack/action touch cleanly: {e}")
+        self.attack_touch_active = False
+
+    def stop_gameplay_controls(self):
+        """Release joystick and attack touches when the bot is outside match gameplay."""
+        self.stop_joystick()
+        self.stop_attack_touch()
+
     def keys_up(self, keys: List[str]):
         if "".join(keys).lower() == "wasd":
             self.stop_joystick()
 
     def keys_down(self, keys: List[str]):
+        if self._abort_if_paused():
+            return False
 
         delta_x, delta_y = 0, 0
         for key in keys:
@@ -1148,23 +1215,33 @@ class WindowController:
             self.last_joystick_pos = (self.joystick_x + delta_x, self.joystick_y + delta_y)
 
     def click(self, x: int, y: int, delay=0.005, already_include_ratio=True, touch_up=True, touch_down=True):
+        if touch_down and self._abort_if_paused():
+            return False
         if not already_include_ratio:
             x = x * self.width_ratio
             y = y * self.height_ratio
         # Use PID_ATTACK for clicks so we don't interrupt movement
-        if touch_down: self.touch_down(x, y, pointer_id=self.PID_ATTACK)
-        time.sleep(delay)
-        if touch_up: self.touch_up(x, y, pointer_id=self.PID_ATTACK)
+        if touch_down:
+            self.touch_down(x, y, pointer_id=self.PID_ATTACK)
+        if not self.pause_aware_sleep(delay):
+            return False
+        if touch_up:
+            self.touch_up(x, y, pointer_id=self.PID_ATTACK)
+        return True
 
     def press_key(self, key, delay=0.005, touch_up=True, touch_down=True):
         if key not in key_coords_dict:
-            return
+            return False
+        if touch_down and self._abort_if_paused():
+            return False
         x, y = key_coords_dict[key]
         target_x = x * self.width_ratio
         target_y = y * self.height_ratio
-        self.click(target_x, target_y, delay, touch_up=touch_up, touch_down=touch_down)
+        return self.click(target_x, target_y, delay, touch_up=touch_up, touch_down=touch_down)
 
     def android_back(self):
+        if self._abort_if_paused():
+            return False
         try:
             completed = _run_adb(self.connected_serial, ["shell", "input", "keyevent", "4"], timeout=3)
             return completed.returncode == 0
@@ -1172,7 +1249,9 @@ class WindowController:
             print(f"Could not press Android Back through ADB: {e}")
             return False
 
-    def aim_attack_angle(self, angle_degrees: float, radius: float = 170.0, duration: float = 0.04):
+    def aim_attack_hold(self, angle_degrees: float, radius: float = 320.0, duration: float = 0.16, touch_up=True, touch_down=True, end_hold: float = 0.08):
+        if touch_down and self._abort_if_paused():
+            return False
         x, y = key_coords_dict["M"]
         start_x = x * self.width_ratio
         start_y = y * self.height_ratio
@@ -1180,9 +1259,40 @@ class WindowController:
         angle_rad = math.radians(angle_degrees)
         end_x = start_x + math.cos(angle_rad) * scaled_radius
         end_y = start_y + math.sin(angle_rad) * scaled_radius
-        self.swipe(start_x, start_y, end_x, end_y, duration=duration)
+        if touch_down:
+            self.touch_down(int(start_x), int(start_y), pointer_id=self.PID_ATTACK)
+            if not self.pause_aware_sleep(0.025):
+                return False
+            steps = max(int(radius / 12), 1)
+            step_delay = duration / steps if steps else 0
+            for i in range(1, steps + 1):
+                t = i / steps
+                cx = start_x + (end_x - start_x) * t
+                cy = start_y + (end_y - start_y) * t
+                if step_delay > 0 and not self.pause_aware_sleep(step_delay):
+                    return False
+                if self._abort_if_paused():
+                    return False
+                self.touch_move(int(cx), int(cy), pointer_id=self.PID_ATTACK)
+        if touch_up:
+            if end_hold > 0 and not self.pause_aware_sleep(end_hold):
+                return False
+            self.touch_up(int(end_x), int(end_y), pointer_id=self.PID_ATTACK)
+        return True
+
+    def aim_attack_angle(self, angle_degrees: float, radius: float = 320.0, duration: float = 0.16, end_hold: float = 0.08):
+        self.aim_attack_hold(
+            angle_degrees,
+            radius=radius,
+            duration=duration,
+            touch_down=True,
+            touch_up=True,
+            end_hold=end_hold,
+        )
 
     def swipe(self, start_x, start_y, end_x, end_y, duration=0.2):
+        if self._abort_if_paused():
+            return False
         dist_x = end_x - start_x
         dist_y = end_y - start_y
         distance = math.sqrt(dist_x ** 2 + dist_y ** 2)
@@ -1199,9 +1309,13 @@ class WindowController:
             t = i / steps
             cx = start_x + dist_x * t
             cy = start_y + dist_y * t
-            time.sleep(step_delay)
+            if not self.pause_aware_sleep(step_delay):
+                return False
+            if self._abort_if_paused():
+                return False
             self.touch_move(int(cx), int(cy), pointer_id=self.PID_ATTACK)
         self.touch_up(int(end_x), int(end_y), pointer_id=self.PID_ATTACK)
+        return True
 
     def close(self):
         if hasattr(self, 'scrcpy_client'):

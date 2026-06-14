@@ -4,12 +4,12 @@ from unittest.mock import MagicMock, patch
 import numpy as np
 from PIL import Image
 
-from lobby_automation import LobbyAutomation
+from control.lobby_automation import LobbyAutomation
 
 
 class TestLobbyAutomation(unittest.TestCase):
 
-    @patch("lobby_automation.load_toml_as_dict")
+    @patch("control.lobby_automation.load_toml_as_dict")
     def setUp(self, mock_load_toml):
         mock_load_toml.return_value = {"lobby": {"brawler_btn": (0, 0), "select_btn": (0, 0)}}
         self.mock_window_controller = MagicMock()
@@ -17,8 +17,9 @@ class TestLobbyAutomation(unittest.TestCase):
         self.mock_window_controller.height_ratio = 1
         self.lobby = LobbyAutomation(self.mock_window_controller)
 
-    @patch("lobby_automation.extract_text_and_positions")
-    def test_can_select_brawlers(self, mock_extract_text):
+    @patch("control.lobby_automation.get_state", return_value="lobby")
+    @patch("control.lobby_automation.extract_text_and_positions")
+    def test_can_select_brawlers(self, mock_extract_text, _mock_state):
         """Tests that bot can select brawlers once he reaches the brawlers selection menu."""
         expected_brawler_x = 2012
         expected_brawler_y = 978

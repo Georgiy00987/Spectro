@@ -3,7 +3,7 @@ import unittest
 import cv2
 import numpy as np
 
-from state_finder import (
+from vision.state_finder import (
     get_in_game_state,
     get_matchmaking_exit_button_center,
     get_starr_nova_got_it_button_center,

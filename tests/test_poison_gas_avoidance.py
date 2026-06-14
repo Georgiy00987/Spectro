@@ -3,7 +3,7 @@ import unittest
 import cv2
 import numpy as np
 
-from play import Play
+from control.play import Play
 
 
 class PoisonGasAvoidanceTests(unittest.TestCase):
@@ -27,7 +27,7 @@ class PoisonGasAvoidanceTests(unittest.TestCase):
     def test_directional_gas_above_moves_down(self):
         play = self.make_play()
         frame = np.zeros((300, 300, 3), dtype=np.uint8)
-        frame[75:105, 135:165] = self.fog_rgb()
+        frame[30:90, 135:165] = self.fog_rgb()  # entirely above 58px band
 
         angle = play.detect_fog_direction_escape(frame, (150, 150))
 

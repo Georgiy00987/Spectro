@@ -14,14 +14,22 @@ from PIL import Image
 import tkinter as tk
 import re
 from core.utils import (
+    config_bool,
     load_toml_as_dict, save_dict_as_toml, get_discord_link, get_dpi_scale,
     save_brawler_data, load_brawler_data, normalize_brawler_name,
     load_brawl_stars_api_config, fetch_brawl_stars_player,
     fetch_brawl_stars_player_by_tag, save_brawler_icon,
     clear_toml_cache, get_config_player_tag
 )
+from core.window_icon import set_window_icon
 from packaging import version
-from core.performance_profile import apply_performance_profile
+from core.performance_profile import (
+    SCRCPY_CAPTURE_KEYS,
+    SCRCPY_CAPTURE_PROFILES,
+    apply_performance_profile,
+    apply_scrcpy_capture_profile,
+    detect_scrcpy_capture_profile,
+)
 from integrations.discord_notifier import async_send_test_notification
 from updates.update_interface import UpdatePanel
 
@@ -53,6 +61,8 @@ class Hub:
         self.latest_version_str = latest_version_str
         self.correct_zoom = correct_zoom
         self.on_close_callback = on_close_callback
+        self.start_requested = False
+        self.closed_by_user = False
         self.brawlers = sorted(brawlers or [])
         self.queue_data = load_brawler_data()
 
@@ -94,6 +104,12 @@ class Hub:
         self.bot_config.setdefault("unstuck_movement_delay", 3.0)
         self.bot_config.setdefault("unstuck_movement_hold_time", 1.5)
         self.bot_config.setdefault("play_again_on_win", "no")
+        self.bot_config.setdefault("aimed_attacks", "no")
+        self.bot_config.setdefault("aimed_attack_radius", 320.0)
+        self.bot_config.setdefault("aimed_attack_duration", 0.16)
+        self.bot_config.setdefault("aimed_attack_end_hold", 0.08)
+        self.bot_config.setdefault("aimed_attacks_ignore_imitation", "yes")
+        self.bot_config.setdefault("imitation_enabled", "yes")
         self.bot_config.setdefault("current_playstyle", "default.pyla")
 
 
@@ -107,7 +123,9 @@ class Hub:
 
         # General config defaults
         self.general_config.setdefault("max_ips", "auto")
-        self.general_config.setdefault("scrcpy_max_fps", 15)
+        self.general_config.setdefault("scrcpy_max_fps", 45)
+        self.general_config.setdefault("scrcpy_max_width", 960)
+        self.general_config.setdefault("scrcpy_bitrate", 2500000)
         self.general_config.setdefault("onnx_cpu_threads", "auto")
         self.general_config.setdefault("used_threads", self.general_config.get("onnx_cpu_threads", "auto"))
         self.general_config.setdefault("super_debug", "no")
@@ -166,6 +184,8 @@ class Hub:
         self.app.title(f"Spectro Hub - {self.version_str}")
         self.app.geometry(f"{S(1000)}x{S(750)}")
         self.app.resizable(False, False)
+        set_window_icon(self.app)
+        self.app.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Hide tooltip on "global" interactions (tab switch, clicks, scroll, key press, focus loss, etc.)
         for seq in ("<ButtonPress>", "<MouseWheel>", "<KeyPress>", "<FocusOut>"):
@@ -203,7 +223,7 @@ class Hub:
         self.tab_additional = self.tabview.add("Additional Settings")
         self.tab_webhook = self.tabview.add("Integrations")
         self.tab_updates = self.tabview.add("Updates")
-        self.developer_enabled = str(self.general_config.get("developer", "no")).strip().lower() in ("yes", "true", "1", "on")
+        self.developer_enabled = config_bool(self.general_config.get("developer"), False)
         if self.developer_enabled:
             self.tab_developer = self.tabview.add("Developer")
         self.tab_timers = self.tabview.add("Timers")
@@ -523,6 +543,7 @@ class Hub:
             "Integrations contains remote control and notifications. Telegram control can pause, resume, stop and show status while the bot is running. Discord can send match summaries and alerts.\n\n"
             "Timers control how often the bot checks combat actions and recovery states. Lower values can react faster but may use more resources. Higher values are calmer and lighter for weaker PCs.\n\n"
             "Match History stores basic results by brawler, including wins, losses, draws and win rate. This is useful for checking which brawlers or settings are performing better.\n\n"
+            "Contacts: Telegram @frendls, Telegram channel @forget_git.\n\n"
             "Recommended setup: Windows 64-bit, Python 3.11, a supported Android emulator such as LDPlayer, MuMu, BlueStacks, Nox, MEmu or GameLoop, emulator resolution 1920x1080, Windows scaling at 100%, and Brawl Stars visible in the foreground before starting.\n\n"
             "Useful config files: cfg/general_config.toml for emulator and performance, cfg/bot_config.toml for gameplay behavior, "
             "cfg/brawler_pick.toml for queue data, cfg/time_tresholds.toml for timer values, cfg/telegram_config.toml and cfg/discord_config.toml for integrations, "
@@ -1319,10 +1340,56 @@ class Hub:
             self.general_config["cpu_or_gpu"] = choice
             save_dict_as_toml(self.general_config, self.general_config_path)
         self._option_setting(performance, row, "Inference Device", gpu_var, ["auto", "directml", "cuda", "openvino", "cpu"], gpu_change, "ONNX backend used by detection."); row += 1
+
+        scrcpy_profile_values = ["custom"] + list(SCRCPY_CAPTURE_PROFILES.keys())
+        scrcpy_profile_var = tk.StringVar(value=detect_scrcpy_capture_profile(self.general_config))
+        scrcpy_status = ctk.CTkLabel(performance, text="", text_color="#9A9A9A", font=("Arial", S(12)), anchor="w")
+
+        def refresh_scrcpy_entry_vars():
+            for key in SCRCPY_CAPTURE_KEYS:
+                var = entry_vars.get((True, key))
+                if var is not None:
+                    var.set(str(self.general_config.get(key, "")))
+
+        def scrcpy_profile_change(choice):
+            if choice == "custom" or getattr(self, "_applying_performance_profile", False):
+                return
+            try:
+                clear_toml_cache(self.general_config_path)
+                result = apply_scrcpy_capture_profile(choice, general_config_path=self.general_config_path)
+                self.general_config.clear(); self.general_config.update(result["general_config"])
+                refresh_scrcpy_entry_vars()
+                scrcpy_profile_var.set(result["profile"])
+                scrcpy_status.configure(
+                    text=(
+                        f"Applied {result['profile']}: "
+                        f"{self.general_config.get('scrcpy_max_fps')} FPS, "
+                        f"width {self.general_config.get('scrcpy_max_width')}, "
+                        f"bitrate {self.general_config.get('scrcpy_bitrate')}. Restart the bot."
+                    ),
+                    text_color="#2ECC71",
+                )
+            except Exception as exc:
+                scrcpy_status.configure(text=f"Could not apply scrcpy profile: {exc}", text_color="#E74C3C")
+
+        self._option_setting(
+            performance,
+            row,
+            "Scrcpy Capture Profile",
+            scrcpy_profile_var,
+            scrcpy_profile_values,
+            scrcpy_profile_change,
+            "Changes only scrcpy_max_fps, scrcpy_max_width and scrcpy_bitrate.",
+            width=150,
+        ); row += 1
+        scrcpy_status.grid(row=row, column=0, columnspan=2, sticky="ew", padx=S(18), pady=(S(0), S(6))); row += 1
+
         for label, key, conv, hint in [
             ("DirectML GPU ID", "directml_device_id", str, "Usually auto, or 0 / 1."),
             ("Max IPS", "max_ips", lambda s: s if s.lower() == "auto" else int(s), "Bot image processing cap."),
             ("Scrcpy Max FPS", "scrcpy_max_fps", int, "Maximum emulator capture FPS."),
+            ("Scrcpy Max Width", "scrcpy_max_width", int, "Maximum capture width sent by scrcpy."),
+            ("Scrcpy Bitrate", "scrcpy_bitrate", int, "Video bitrate in bits per second."),
             ("Used Threads", "used_threads", lambda s: s if s.lower() == "auto" else int(s), "CPU threads for detection."),
         ]:
             entry_vars[(True, key)] = self._entry_setting(performance, row, label, self.general_config, self.general_config_path, key, conv, hint); row += 1
@@ -1338,6 +1405,7 @@ class Hub:
                 self.general_config.clear(); self.general_config.update(result["general_config"])
                 self.bot_config.clear(); self.bot_config.update(result["bot_config"])
                 gpu_var.set(str(self.general_config.get("cpu_or_gpu", "auto")))
+                scrcpy_profile_var.set(detect_scrcpy_capture_profile(self.general_config))
                 for (is_general, key), var in entry_vars.items():
                     cfg = self.general_config if is_general else self.bot_config
                     if key in cfg: var.set(str(cfg[key]))
@@ -1358,6 +1426,11 @@ class Hub:
         ]:
             self._entry_setting(behavior, row, label, self.bot_config, self.bot_config_path, key, conv, hint); row += 1
         self._toggle_setting(behavior, row, "Play Again On Win", self.bot_config, self.bot_config_path, "play_again_on_win", "Press Play Again after wins."); row += 1
+        self._toggle_setting(behavior, row, "Aimed Attacks", self.bot_config, self.bot_config_path, "aimed_attacks", "Drag the attack joystick toward the enemy before firing."); row += 1
+        self._entry_setting(behavior, row, "Aim Radius", self.bot_config, self.bot_config_path, "aimed_attack_radius", float, "How far to drag attack joystick."); row += 1
+        self._entry_setting(behavior, row, "Aim Duration", self.bot_config, self.bot_config_path, "aimed_attack_duration", float, "Seconds spent dragging attack joystick."); row += 1
+        self._entry_setting(behavior, row, "Aim End Hold", self.bot_config, self.bot_config_path, "aimed_attack_end_hold", float, "Hold at final aim point before release."); row += 1
+        self._toggle_setting(behavior, row, "Imitation Movement", self.bot_config, self.bot_config_path, "imitation_enabled", "Enable or disable learned movement policy."); row += 1
         self._toggle_setting(behavior, row, "Longpress Star Drop", self.general_config, self.general_config_path, "long_press_star_drop", "Use long press for star drops.")
 
         vision, row = self._card(root, 2, 0, "Vision", "Detection thresholds. Lower values detect more but can increase false detections.")
@@ -1805,6 +1878,15 @@ class Hub:
         timer_row(recovery, row, "wall_detection", "Wall Detection", "How often the bot detects walls around the player."); row += 1
         timer_row(recovery, row, "no_detection_proceed", "No Detection Proceed", "How often the bot presses Q when it cannot detect state.")
 
+    def _reset_match_history(self):
+        self.match_history = {"total": {"victory": 0, "defeat": 0, "draw": 0}}
+        save_dict_as_toml(self.match_history, self.match_history_path)
+        clear_toml_cache(self.match_history_path)
+        for child in self.tab_history.winfo_children():
+            child.destroy()
+        self._init_history_tab()
+        print("Match history reset.")
+
     def _init_history_tab(self):
         root = self._scroll_root(self.tab_history)
         self._header(root, "Match History", "Compact stats by brawler, sorted by activity.")
@@ -1824,6 +1906,21 @@ class Hub:
             box = ctk.CTkFrame(summary, fg_color="#242424", corner_radius=S(10)); box.grid(row=0, column=col, sticky="ew", padx=S(8), pady=S(10))
             ctk.CTkLabel(box, text=title, text_color="#9A9A9A", font=("Arial", S(11), "bold")).pack(pady=(S(10), S(2)))
             ctk.CTkLabel(box, text=str(value), text_color=color, font=("Arial", S(22), "bold")).pack(pady=(0, S(10)))
+        summary.grid_columnconfigure(4, weight=0)
+        reset_box = ctk.CTkFrame(summary, fg_color="#242424", corner_radius=S(10))
+        reset_box.grid(row=0, column=4, sticky="nsew", padx=S(8), pady=S(10))
+        ctk.CTkLabel(reset_box, text="Actions", text_color="#9A9A9A", font=("Arial", S(11), "bold")).pack(pady=(S(10), S(6)))
+        ctk.CTkButton(
+            reset_box,
+            text="Reset History",
+            command=self._reset_match_history,
+            fg_color="#7d2020",
+            hover_color="#a52a2a",
+            font=("Arial", S(12), "bold"),
+            width=S(120),
+            height=S(34),
+            corner_radius=S(9),
+        ).pack(padx=S(10), pady=(0, S(10)))
         list_frame = ctk.CTkScrollableFrame(root, fg_color="transparent", height=S(500), scrollbar_button_color="#333333", scrollbar_button_hover_color="#BB3A3A")
         list_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=S(8), pady=S(8))
         for col in range(3): list_frame.grid_columnconfigure(col, weight=1)
@@ -1844,13 +1941,17 @@ class Hub:
             ctk.CTkLabel(card, text=f"{item['games']} games  •  {item['wr']}% WR", text_color=("#2ecc71" if item["wr"] >= 50 else "#e74c3c"), font=("Arial", S(12), "bold"), anchor="w").grid(row=1, column=1, sticky="ew", padx=(0, S(10)))
             ctk.CTkLabel(card, text=f"W {item['victory']}   L {item['defeat']}   D {item['draw']}", text_color="#9A9A9A", font=("Arial", S(11)), anchor="w").grid(row=2, column=1, sticky="ew", padx=(0, S(10)), pady=(0, S(10)))
 
-    def _on_start(self):
+    def _close_app_window(self):
         try:
             for after_id in self.app.tk.call("after", "info"):
                 try:
                     self.app.after_cancel(after_id)
                 except Exception:
                     pass
+        except Exception:
+            pass
+        try:
+            self._hide_tooltip()
         except Exception:
             pass
         try:
@@ -1866,6 +1967,16 @@ class Hub:
             self.app.destroy()
         except Exception:
             pass
+
+    def _on_close(self):
+        self.start_requested = False
+        self.closed_by_user = True
+        self._close_app_window()
+
+    def _on_start(self):
+        self.start_requested = True
+        self.closed_by_user = False
+        self._close_app_window()
 
         if callable(self.on_close_callback):
             self.on_close_callback()

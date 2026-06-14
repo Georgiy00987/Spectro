@@ -2,7 +2,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from discord_control import command_allowed, set_runtime_state
+from app.discord_control import command_allowed, set_runtime_state
 from app.runtime_control import PAUSED, RUNNING, read_state
 
 

@@ -315,8 +315,8 @@
         "hold_attack": 0
     },
     "sprout": {
-        "safe_range": 196.0,
-        "attack_range": 320.0,
+        "safe_range": 350.0,
+        "attack_range": 450.0,
         "super_type": "other_target",
         "super_range": 490,
         "ignore_walls_for_attacks": true,

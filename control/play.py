@@ -1,4 +1,4 @@
-﻿import math
+import math
 import json
 import os
 import random
@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 from vision.state_finder import get_state
 from vision.detect import Detect, format_onnx_backend
-from core.utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info
+from core.utils import load_toml_as_dict, count_hsv_pixels, load_brawlers_info, config_bool
 from control.navigation import GridNavigator
 
 brawl_stars_width, brawl_stars_height = 1920, 1080
@@ -37,7 +37,7 @@ class Movement:
         }
         self.game_mode = bot_config["gamemode_type"]
         gadget_value = bot_config["bot_uses_gadgets"]
-        self.should_use_gadget = str(gadget_value).lower() in ("yes", "true", "1")
+        self.should_use_gadget = config_bool(gadget_value, True)
         self.gadget_cooldown = float(bot_config.get("gadget_cooldown", 1.0))
         self.last_gadget_time = 0.0
         self.super_cooldown = float(bot_config.get("super_cooldown", 1.0))
@@ -58,9 +58,9 @@ class Movement:
         self.attack_cooldown = float(bot_config.get("attack_cooldown", 0.16))
         self.last_attack_time = 0.0
         self.TILE_SIZE = 60
-        self.wall_stuck_enabled = str(bot_config.get("wall_stuck_enabled", "yes")).lower() in ("yes", "true", "1")
+        self.wall_stuck_enabled = config_bool(bot_config.get("wall_stuck_enabled"), True)
         general_config = load_toml_as_dict("cfg/general_config.toml")
-        self.wall_stuck_debug = str(general_config.get("wall_stuck_debug", "no")).lower() in ("yes", "true", "1")
+        self.wall_stuck_debug = config_bool(general_config.get("wall_stuck_debug"), False)
         self.wall_stuck_ignore_radius = float(bot_config.get("wall_stuck_ignore_radius", 150))
         self.wall_stuck_sample_interval = float(bot_config.get("wall_stuck_sample_interval", 0.2))
         self.wall_stuck_shift_threshold = float(bot_config.get("wall_stuck_shift_threshold", 3.0))
@@ -68,16 +68,40 @@ class Movement:
         self.wall_stuck_min_walls = int(bot_config.get("wall_stuck_min_walls", 3))
         self.wall_path_padding = float(bot_config.get("wall_path_padding", 28))
         self.wall_path_probe_tiles = float(bot_config.get("wall_path_probe_tiles", 1.5))
+        # Attack LOS is intentionally stricter than movement LOS. Movement can
+        # slide around corners, but a projectile fired while hugging a wall often
+        # hits the wall immediately. These settings stop ranged brawlers from
+        # auto-attacking when the center ray to the enemy is blocked.
+        self.attack_wall_padding = float(bot_config.get("attack_wall_padding", max(12.0, self.wall_path_padding * 0.5)))
+        self.attack_side_ray_offset = float(bot_config.get("attack_side_ray_offset", 20.0))
+        self.attack_min_clear_rays = int(bot_config.get("attack_min_clear_rays", 2))
+        self.attack_require_center_los = config_bool(bot_config.get("attack_require_center_los"), True)
+        # Approach navigation uses a wider corridor than normal movement. This
+        # makes the bot start going around walls before it is already touching
+        # them, especially while chasing an enemy.
+        self.approach_wall_padding = float(bot_config.get("approach_wall_padding", self.wall_path_padding + 16))
+        self.approach_side_ray_offset = float(bot_config.get("approach_side_ray_offset", 32.0))
+        self.approach_lookahead_tiles = float(bot_config.get("approach_lookahead_tiles", 3.0))
+        self.approach_sweep_range = int(bot_config.get("approach_sweep_range", 150))
+        self.approach_sweep_step = int(bot_config.get("approach_sweep_step", 10))
         self.wall_box_min_size = float(bot_config.get("wall_box_min_size", 20))
         self.wall_box_merge_iou = float(bot_config.get("wall_box_merge_iou", 0.25))
         self.wall_box_merge_center_distance = float(bot_config.get("wall_box_merge_center_distance", 35))
         self.wall_history_min_hits = int(bot_config.get("wall_history_min_hits", 1))
+        self.wall_history_use_while_moving = config_bool(bot_config.get("wall_history_use_while_moving"), True)
+        self.wall_history_moving_frames = int(bot_config.get("wall_history_moving_frames", 2))
         self.wall_stuck_state = {
             "last_sample_time": 0.0,
             "last_wall_centers": None,   # np.ndarray (N, 2) of filtered wall centers
             "stationary_since": None,    # when walls first went stationary; None = not stationary
         }
         self.use_astar_navigation = bool(bot_config.get("use_astar_navigation", True))
+        self.roam_up_route_enabled = config_bool(bot_config.get("roam_up_route_enabled"), True)
+        self.roam_up_min_progress_cells = int(bot_config.get("roam_up_min_progress_cells", 0))
+        self.roam_up_close_wall_slide_enabled = config_bool(bot_config.get("roam_up_close_wall_slide_enabled"), True)
+        self.roam_up_close_wall_distance = float(bot_config.get("roam_up_close_wall_distance", 130))
+        self.roam_up_close_wall_clearance = float(bot_config.get("roam_up_close_wall_clearance", 42))
+        self.roam_up_close_wall_side_distance = float(bot_config.get("roam_up_close_wall_side_distance", 180))
         self.navigator = GridNavigator(
             cell_size=float(bot_config.get("nav_cell_size", 30)),
             grid_radius_cells=int(bot_config.get("nav_grid_radius", 16)),
@@ -85,11 +109,12 @@ class Movement:
         )
         self.match_start_follow_seconds = float(bot_config.get("match_start_follow_seconds", 3.5))
         self.match_start_time = 0.0
-        self.follow_teammates_above = str(bot_config.get("follow_teammates_above", "no")).lower() in ("yes", "true",
-                                                                                                      "1")
+        self.follow_teammates_above = config_bool(bot_config.get("follow_teammates_above"), False)
         self.follow_above_margin = float(bot_config.get("follow_above_margin", 20))
-        self.follow_above_yield_to_combat = str(bot_config.get("follow_above_yield_to_combat", "yes")).lower() in (
-            "yes", "true", "1")
+        self.follow_above_yield_to_combat = config_bool(bot_config.get("follow_above_yield_to_combat"), True)
+        self.teammate_prefer_higher = config_bool(bot_config.get("teammate_prefer_higher"), True)
+        self.teammate_prefer_higher_margin = float(bot_config.get("teammate_prefer_higher_margin", self.follow_above_margin))
+        self.teammate_prefer_higher_distance_penalty = float(bot_config.get("teammate_prefer_higher_distance_penalty", 0.08))
 
         # Semicircle escape state. Alternates side globally between triggers.
         self.escape_retreat_duration = float(bot_config.get("escape_retreat_duration", 0.4))
@@ -103,7 +128,7 @@ class Movement:
         }
         self._next_arc_side = 1
         self.adaptive_safe_range_multiplier = 1.0
-        self.strafe_enabled = str(bot_config.get("strafe_while_attacking", "yes")).lower() in ("yes", "true", "1")
+        self.strafe_enabled = config_bool(bot_config.get("strafe_while_attacking"), True)
         self.strafe_interval = float(bot_config.get("strafe_interval", 1.6))
         self.strafe_blend = float(bot_config.get("strafe_blend", 0.35))
         self._strafe_started_at = 0.0
@@ -111,8 +136,18 @@ class Movement:
         self.combat_dodge_blend = float(bot_config.get("combat_dodge_blend", 0.45))
         self.combat_dodge_jitter_degrees = float(bot_config.get("combat_dodge_jitter_degrees", 18.0))
         self.enemy_pressure_move_range_multiplier = float(bot_config.get("enemy_pressure_move_range_multiplier", 1.15))
-        self.lead_shots_enabled = str(bot_config.get("lead_shots", "yes")).lower() in ("yes", "true", "1")
-        self.aimed_attacks_enabled = str(bot_config.get("aimed_attacks", "no")).lower() in ("yes", "true", "1")
+        self.lead_shots_enabled = config_bool(bot_config.get("lead_shots"), True)
+        self.aimed_attacks_enabled = config_bool(bot_config.get("aimed_attacks"), False)
+        self.aimed_attack_radius = float(bot_config.get("aimed_attack_radius", 320.0))
+        self.aimed_attack_duration = float(bot_config.get("aimed_attack_duration", 0.16))
+        self.aimed_attack_end_hold = float(bot_config.get("aimed_attack_end_hold", 0.08))
+        self.aimed_attacks_ignore_imitation = config_bool(bot_config.get("aimed_attacks_ignore_imitation"), True)
+        self.imitation_enabled = config_bool(bot_config.get("imitation_enabled"), True)
+        if self.aimed_attacks_enabled and self.aimed_attacks_ignore_imitation:
+            # The imitation policy was trained with auto-attack behavior. When
+            # aimed attacks are enabled, ignore the imitation policy so combat
+            # always uses explicit attack joystick dragging toward the enemy.
+            self.imitation_enabled = False
         self.projectile_speed_px_s = float(bot_config.get("projectile_speed_px_s", 900.0))
         self._enemy_track = {}
         self.enemy_velocity = (0.0, 0.0)
@@ -199,9 +234,36 @@ class Movement:
                 return False
             self.last_attack_time = current_time
         if hasattr(self.window_controller, "aim_attack_angle"):
-            self.window_controller.aim_attack_angle(angle_degrees)
+            self.window_controller.aim_attack_angle(
+                angle_degrees,
+                radius=self.aimed_attack_radius,
+                duration=self.aimed_attack_duration,
+                end_hold=self.aimed_attack_end_hold,
+            )
             return True
-        return self.attack()
+        print("Aimed attacks enabled, but aim_attack_angle is unavailable; skipping auto attack fallback.")
+        return False
+
+    def hold_aimed_attack(self, angle_degrees, touch_up=True, touch_down=True):
+        """Aimed replacement for hold-attack brawlers.
+
+        Auto attack is intentionally not used when aimed attacks are enabled.
+        For hold attacks we drag the attack joystick and keep/release the attack
+        pointer depending on the requested touch flags.
+        """
+        if not self.aimed_attacks_enabled:
+            return self.attack(touch_up=touch_up, touch_down=touch_down)
+        if not hasattr(self.window_controller, "aim_attack_hold"):
+            return self.aimed_attack(angle_degrees) if touch_up and touch_down else False
+        self.window_controller.aim_attack_hold(
+            angle_degrees,
+            radius=self.aimed_attack_radius,
+            duration=self.aimed_attack_duration,
+            touch_up=touch_up,
+            touch_down=touch_down,
+            end_hold=self.aimed_attack_end_hold,
+        )
+        return True
 
     def use_hypercharge(self):
         print("Using hypercharge")
@@ -540,22 +602,22 @@ class Play(Movement):
         self.teammate_hysteresis = 0.75
         self.teammate_lock_max_jump = float(bot_config.get("teammate_lock_max_jump", 320))
         self.teammate_lock_lost_since = 0.0
-        self.trio_grouping_enabled = str(bot_config.get("trio_grouping_enabled", "yes")).lower() in ("yes", "true", "1")
+        self.trio_grouping_enabled = config_bool(bot_config.get("trio_grouping_enabled"), True)
         self.teammate_follow_min_distance = float(bot_config.get("teammate_follow_min_distance", 180))
         self.teammate_follow_max_distance = float(bot_config.get("teammate_follow_max_distance", 520))
         self.teammate_follow_step_distance = float(bot_config.get("teammate_follow_step_distance", 8))
         self.teammate_combat_regroup_distance = float(bot_config.get("teammate_combat_regroup_distance", 650))
         self.teammate_combat_bias = float(bot_config.get("teammate_combat_bias", 0.75))
-        self.teammate_follow_force_direct = str(bot_config.get("teammate_follow_force_direct", "no")).lower() in ("yes", "true", "1")
-        self.teammate_marker_follow_enabled = str(bot_config.get("teammate_marker_follow_enabled", "yes")).lower() in ("yes", "true", "1")
+        self.teammate_follow_force_direct = config_bool(bot_config.get("teammate_follow_force_direct"), False)
+        self.teammate_marker_follow_enabled = config_bool(bot_config.get("teammate_marker_follow_enabled"), True)
         self.teammate_marker_edge_margin = float(bot_config.get("teammate_marker_edge_margin", 0.28))
         self.teammate_marker_fallback_delay = float(bot_config.get("teammate_marker_fallback_delay", 1.25))
         self.last_teammate_seen_time = 0.0
         self.last_jump_pad_data = []
-        self.jump_pad_detection_enabled = str(bot_config.get("jump_pad_detection_enabled", "yes")).lower() in ("yes", "true", "1")
+        self.jump_pad_detection_enabled = config_bool(bot_config.get("jump_pad_detection_enabled"), True)
         self.jump_pad_escape_distance = float(bot_config.get("jump_pad_escape_distance", 620))
         self.jump_pad_escape_min_distance = float(bot_config.get("jump_pad_escape_min_distance", 55))
-        self.jump_pad_escape_requires_edge = str(bot_config.get("jump_pad_escape_requires_edge", "yes")).lower() in ("yes", "true", "1")
+        self.jump_pad_escape_requires_edge = config_bool(bot_config.get("jump_pad_escape_requires_edge"), True)
         self.jump_pad_escape_edge_margin = float(bot_config.get("jump_pad_escape_edge_margin", 0.22))
         self.jump_pad_escape_teammate_safe_distance = float(bot_config.get("jump_pad_escape_teammate_safe_distance", 360))
         self.jump_pad_smoke_early_distance = float(bot_config.get("jump_pad_smoke_early_distance", 230))
@@ -581,7 +643,7 @@ class Play(Movement):
         self.seconds_to_hold_attack_after_reaching_max = load_toml_as_dict("cfg/bot_config.toml")["seconds_to_hold_attack_after_reaching_max"]
         self.current_frame = None
         # --- HP-aware combat logic (added by patch_hp_logic) ---
-        self.hp_logic_enabled = str(bot_config.get("hp_logic_enabled", "yes")).lower() in ("yes", "true", "1")
+        self.hp_logic_enabled = config_bool(bot_config.get("hp_logic_enabled"), True)
         self.low_hp_threshold = float(bot_config.get("low_hp_threshold", 0.25))
         self.enemy_low_hp_threshold = float(bot_config.get("enemy_low_hp_threshold", 0.30))
         self.hp_estimator_cfg = bot_config.get("hp_estimator_cfg", {}) or {}
@@ -591,8 +653,8 @@ class Play(Movement):
         self.gadget_crop_area = lobby_config['pixel_counter_crop_area']['gadget']
         self.hypercharge_crop_area = lobby_config['pixel_counter_crop_area']['hypercharge']
         global debug, visual_debug
-        debug = str(general_config.get("super_debug", "no")).lower() in ("yes", "true", "1")
-        visual_debug = str(general_config.get("visual_debug", "no")).lower() in ("yes", "true", "1")
+        debug = config_bool(general_config.get("super_debug"), False)
+        visual_debug = config_bool(general_config.get("visual_debug"), False)
         self.visual_debug_scale = max(0.25, min(1.0, float(general_config.get("visual_debug_scale", 0.6))))
         self.visual_debug_max_fps = max(1.0, float(general_config.get("visual_debug_max_fps", 30)))
         self.visual_debug_max_boxes = max(20, int(general_config.get("visual_debug_max_boxes", 120)))
@@ -602,7 +664,7 @@ class Play(Movement):
         self._visual_debug_payload = None
         self._visual_debug_thread = None
         self._visual_debug_stop = False
-        self.capture_bad_vision_frames = str(general_config.get("capture_bad_vision_frames", "no")).lower() in ("yes", "true", "1")
+        self.capture_bad_vision_frames = config_bool(general_config.get("capture_bad_vision_frames"), False)
         self.bad_vision_capture_dir = general_config.get("bad_vision_capture_dir", "debug_frames/vision")
         self.bad_vision_capture_interval = float(general_config.get("bad_vision_capture_interval", 2.0))
         self.bad_vision_capture_max = int(general_config.get("bad_vision_capture_max", 500))
@@ -962,6 +1024,36 @@ class Play(Movement):
                 closest_teammate = teammate_pos
         return closest_teammate, closest_distance
 
+    def find_preferred_teammate(self, teammate_data, player_coords, walls=None):
+        """Choose teammate to follow.
+
+        If a teammate is above the player, prefer that teammate even when a
+        lower teammate is closer. This makes trio/showdown grouping move toward
+        the teammate who is already farther up the map instead of dragging the
+        bot back down to a nearer teammate.
+        """
+        closest_pos, closest_dist = self.find_closest_teammate(teammate_data, player_coords, walls)
+        if not getattr(self, "teammate_prefer_higher", True):
+            return closest_pos, closest_dist
+
+        margin = float(getattr(self, "teammate_prefer_higher_margin", getattr(self, "follow_above_margin", 20)))
+        above = []
+        for teammate in teammate_data or []:
+            teammate_pos = self.get_enemy_pos(teammate)
+            if teammate_pos[1] < player_coords[1] - margin:
+                distance = self.get_distance(teammate_pos, player_coords)
+                # Primary: higher on screen. Secondary: distance with a small
+                # penalty, so a much higher teammate wins even if farther away.
+                score = teammate_pos[1] + distance * float(getattr(self, "teammate_prefer_higher_distance_penalty", 0.08))
+                above.append((score, teammate_pos[1], distance, teammate_pos))
+
+        if not above:
+            return closest_pos, closest_dist
+
+        above.sort(key=lambda item: (item[0], item[1], item[2]))
+        _, _, distance, teammate_pos = above[0]
+        return teammate_pos, distance
+
     def _build_trusted_fog_mask(self, frame, roi_center, roi_radius):
 
         if frame is None:
@@ -1262,18 +1354,10 @@ class Play(Movement):
 
     def get_closest_teammate(self, player_data, teammate_data):
         player_pos = self.get_player_pos(player_data)
-        closest_teammate = None
-        closest_distance = float('inf')
-        for tm in teammate_data or []:
-            tm_pos = self.get_enemy_pos(tm)
-            dist = self.get_distance(tm_pos, player_pos)
-            if dist < closest_distance:
-                closest_distance = dist
-                closest_teammate = tm_pos
-        return closest_teammate, closest_distance
+        return self.find_preferred_teammate(teammate_data, player_pos)
 
     def choose_locked_teammate(self, player_pos, teammate_data, walls=None):
-        closest_teammate, closest_distance = self.find_closest_teammate(teammate_data, player_pos, walls)
+        closest_teammate, closest_distance = self.find_preferred_teammate(teammate_data, player_pos, walls)
         if closest_teammate is None:
             if self.teammate_lock_lost_since <= 0:
                 self.teammate_lock_lost_since = time.time()
@@ -1303,6 +1387,14 @@ class Play(Movement):
             tracked_distance = candidates[0][1]
 
         if tracked_lock is None:
+            self.locked_teammate = closest_teammate
+            self.locked_teammate_distance = closest_distance
+            return self.locked_teammate, self.locked_teammate_distance
+
+        margin = float(getattr(self, "teammate_prefer_higher_margin", getattr(self, "follow_above_margin", 20)))
+        preferred_is_above = closest_teammate[1] < player_pos[1] - margin
+        tracked_is_above = tracked_lock[1] < player_pos[1] - margin
+        if preferred_is_above and not tracked_is_above:
             self.locked_teammate = closest_teammate
             self.locked_teammate_distance = closest_distance
             return self.locked_teammate, self.locked_teammate_distance
@@ -1590,7 +1682,10 @@ class Play(Movement):
         must_brawler_hold_attack = self.must_brawler_hold_attack(brawler, self.brawlers_info)
         if must_brawler_hold_attack and self.time_since_holding_attack is not None and \
                 time.time() - self.time_since_holding_attack >= brawler_info['hold_attack'] + self.seconds_to_hold_attack_after_reaching_max:
-            self.attack(touch_up=True, touch_down=False)
+            if self.aimed_attacks_enabled and hasattr(self.window_controller, "stop_attack_touch"):
+                self.window_controller.stop_attack_touch()
+            else:
+                self.attack(touch_up=True, touch_down=False)
             self.time_since_holding_attack = None
 
         safe_range, attack_range, super_range = self.get_brawler_range(brawler)
@@ -1745,9 +1840,9 @@ class Play(Movement):
                 else:
                     if self.time_since_holding_attack is None:
                         self.time_since_holding_attack = time.time()
-                        self.attack(touch_up=False, touch_down=True)
+                        self.hold_aimed_attack(toward_angle, touch_up=False, touch_down=True)
                     elif time.time() - self.time_since_holding_attack >= self.brawlers_info[brawler]['hold_attack']:
-                        self.attack(touch_up=True, touch_down=False)
+                        self.hold_aimed_attack(toward_angle, touch_up=True, touch_down=False)
                         self.time_since_holding_attack = None
         else:
             vlog(f"enemy out of attack range (dist={int(enemy_distance)}px, range={attack_range}px)")
@@ -1762,7 +1857,10 @@ class Play(Movement):
         must_brawler_hold_attack = self.must_brawler_hold_attack(brawler, self.brawlers_info)
         if must_brawler_hold_attack and self.time_since_holding_attack is not None and \
                 time.time() - self.time_since_holding_attack >= brawler_info['hold_attack'] + self.seconds_to_hold_attack_after_reaching_max:
-            self.attack(touch_up=True, touch_down=False)
+            if self.aimed_attacks_enabled and hasattr(self.window_controller, "stop_attack_touch"):
+                self.window_controller.stop_attack_touch()
+            else:
+                self.attack(touch_up=True, touch_down=False)
             self.time_since_holding_attack = None
 
         safe_range, attack_range, super_range = self.get_brawler_range(brawler)
@@ -1923,9 +2021,9 @@ class Play(Movement):
                 else:
                     if self.time_since_holding_attack is None:
                         self.time_since_holding_attack = time.time()
-                        self.attack(touch_up=False, touch_down=True)
+                        self.hold_aimed_attack(toward_angle, touch_up=False, touch_down=True)
                     elif time.time() - self.time_since_holding_attack >= self.brawlers_info[brawler]['hold_attack']:
-                        self.attack(touch_up=True, touch_down=False)
+                        self.hold_aimed_attack(toward_angle, touch_up=True, touch_down=False)
                         self.time_since_holding_attack = None
         else:
             vlog(f"enemy out of attack range (dist={int(enemy_distance)}px, range={attack_range}px)")
@@ -1955,26 +2053,38 @@ class Play(Movement):
         if self.can_attack_through_walls(self.current_brawler, skill_type, self.brawlers_info):
             return True
 
-        # snapped padding: real projectile has physical width
-        _PAD = 12
-        # side-ray offset (≈ half enemy hitbox) to catch corner shots
-        _SIDE = 20.0
+        # Snapped padding: real projectiles have width. This padding is stricter
+        # for attacks than for target selection movement, so ranged brawlers do
+        # not waste ammo into walls when standing close to corners.
+        pad = float(getattr(self, "attack_wall_padding", 12.0))
+        side_offset = float(getattr(self, "attack_side_ray_offset", 20.0))
+        min_clear_rays = max(1, min(3, int(getattr(self, "attack_min_clear_rays", 2))))
+        require_center_los = bool(getattr(self, "attack_require_center_los", True))
 
         ex, ey = enemy_pos
         px, py = player_pos
         dist = math.hypot(ex - px, ey - py) or 1.0
-        perp_x = -(ey - py) / dist * _SIDE
-        perp_y =  (ex - px) / dist * _SIDE
+        perp_x = -(ey - py) / dist * side_offset
+        perp_y =  (ex - px) / dist * side_offset
 
-        blocked = sum(
-            1 for p2 in (
-                (ex, ey),
-                (ex + perp_x, ey + perp_y),
-                (ex - perp_x, ey - perp_y),
-            )
-            if self.walls_block_line_of_sight(player_pos, p2, walls, padding=_PAD)
+        # Center ray is the real aiming direction. Side rays are only a small
+        # tolerance for enemy hitbox width, they must not allow shooting when the
+        # actual shot would immediately hit a wall.
+        rays = (
+            (ex, ey),
+            (ex + perp_x, ey + perp_y),
+            (ex - perp_x, ey - perp_y),
         )
-        return blocked < 2
+        blocked = [
+            self.walls_block_line_of_sight(player_pos, p2, walls, padding=pad)
+            for p2 in rays
+        ]
+
+        if require_center_los and blocked[0]:
+            return False
+
+        clear_rays = sum(1 for is_blocked in blocked if not is_blocked)
+        return clear_rays >= min_clear_rays
 
     def find_closest_enemy(self, enemy_data, player_coords, walls, skill_type):
         player_pos_x, player_pos_y = player_coords
@@ -2106,6 +2216,71 @@ class Play(Movement):
                 return True
         return False
 
+    def is_heading_corridor_blocked(self, player_pos, angle_degrees, walls, distance=None, padding=None, side_offset=None):
+        """Check a movement corridor, not just the center ray.
+
+        The player has body width and the joystick can push slightly into a
+        corner. Three parallel rays catch walls before the player is already in
+        contact with them.
+        """
+        if not walls:
+            return False
+        if distance is None:
+            distance = self.TILE_SIZE * self.window_controller.scale_factor * float(getattr(self, "approach_lookahead_tiles", 3.0))
+        if padding is None:
+            padding = float(getattr(self, "approach_wall_padding", self.wall_path_padding))
+        if side_offset is None:
+            side_offset = float(getattr(self, "approach_side_ray_offset", 32.0))
+
+        angle_rad = math.radians(angle_degrees)
+        cos_a = math.cos(angle_rad)
+        sin_a = math.sin(angle_rad)
+        perp_x = -sin_a * side_offset
+        perp_y = cos_a * side_offset
+        probes = (
+            max(1.0, distance * 0.45),
+            max(1.0, distance * 0.75),
+            max(1.0, distance),
+        )
+
+        for d in probes:
+            end = (player_pos[0] + cos_a * d, player_pos[1] + sin_a * d)
+            for off_x, off_y in ((0.0, 0.0), (perp_x, perp_y), (-perp_x, -perp_y)):
+                p1 = (player_pos[0] + off_x, player_pos[1] + off_y)
+                p2 = (end[0] + off_x, end[1] + off_y)
+                if self.walls_block_line_of_sight(p1, p2, walls, padding=padding):
+                    return True
+        return False
+
+    def find_best_corridor_angle(self, player_pos, desired_angle, walls, sweep_range=None, step=None, distance=None):
+        """Find the nearest angle with a clear movement corridor."""
+        if sweep_range is None:
+            sweep_range = int(getattr(self, "approach_sweep_range", 150))
+        if step is None:
+            step = int(getattr(self, "approach_sweep_step", 10))
+        step = max(1, int(step))
+        if not self.is_heading_corridor_blocked(player_pos, desired_angle, walls, distance=distance):
+            return desired_angle
+
+        for offset in range(step, int(sweep_range) + 1, step):
+            for sign in (1, -1):
+                candidate = (desired_angle + sign * offset) % 360
+                if not self.is_heading_corridor_blocked(player_pos, candidate, walls, distance=distance):
+                    return candidate
+        return desired_angle
+
+    def refine_approach_heading(self, player_pos, desired_angle, walls, enemy_distance=None):
+        """Make chasing movement avoid walls earlier than the normal path check."""
+        if desired_angle is None or not isinstance(desired_angle, (int, float)):
+            return desired_angle
+        base_distance = self.TILE_SIZE * self.window_controller.scale_factor * float(getattr(self, "approach_lookahead_tiles", 3.0))
+        if enemy_distance is not None:
+            base_distance = min(base_distance, max(self.TILE_SIZE, float(enemy_distance)))
+        refined = self.find_best_corridor_angle(player_pos, float(desired_angle), walls, distance=base_distance)
+        if visual_debug and refined != desired_angle:
+            vlog(f"approach corridor adjusted {float(desired_angle):.1f}° -> {float(refined):.1f}°")
+        return refined
+
     def find_best_angle(self, player_pos, desired_angle, walls, sweep_range=180, step=5):
         """Find the closest unblocked angle to desired_angle within ±sweep_range degrees.
 
@@ -2136,6 +2311,113 @@ class Play(Movement):
             )
         except Exception as exc:
             if debug: print("nav error:", exc)
+            return None
+
+    def find_upward_close_wall_slide_heading(self, player_pos, walls):
+        """Return a side-slide angle when the bot is pressed against a wall above.
+
+        A* uses inflated walls for safety. When the player gets very close to a
+        wall, the current position can fall inside that inflated area, so normal
+        route planning may fail or keep trying to go upward. This helper detects
+        the nearest wall directly above/overlapping the player and commands a
+        pure left/right slide toward the nearest edge until upward routing works
+        again.
+        """
+        if not getattr(self, "roam_up_close_wall_slide_enabled", True):
+            return None
+        if not walls or player_pos is None:
+            return None
+
+        px, py = player_pos
+        clearance = float(getattr(self, "roam_up_close_wall_clearance", 42.0))
+        max_gap = float(getattr(self, "roam_up_close_wall_distance", 130.0))
+        side_distance = float(getattr(self, "roam_up_close_wall_side_distance", 180.0))
+
+        candidates = []
+        for wall in walls:
+            x1, y1, x2, y2 = map(float, wall[:4])
+            if x2 < x1:
+                x1, x2 = x2, x1
+            if y2 < y1:
+                y1, y2 = y2, y1
+
+            # Wall is above/in front of upward movement. Negative gap means the
+            # player is already inside the padded/contact zone, which is exactly
+            # the problematic case we want to recover from.
+            vertical_gap = py - y2
+            horizontally_overlaps = (x1 - clearance) <= px <= (x2 + clearance)
+            if horizontally_overlaps and -clearance <= vertical_gap <= max_gap:
+                candidates.append((abs(vertical_gap), x1, y1, x2, y2))
+
+        if not candidates:
+            return None
+
+        _, x1, y1, x2, y2 = min(candidates, key=lambda item: item[0])
+        left_target_x = x1 - clearance
+        right_target_x = x2 + clearance
+        left_cost = abs(px - left_target_x)
+        right_cost = abs(px - right_target_x)
+        preferred = [(left_cost, 180.0), (right_cost, 0.0)]
+        preferred.sort(key=lambda item: item[0])
+
+        # Use raw, non-padded center-line checks here. If the bot is already in
+        # an inflated wall area, padded corridor checks would mark every escape
+        # direction as blocked. Actual wall boxes still prevent sliding through
+        # the obstacle itself.
+        for _, angle in preferred:
+            rad = math.radians(angle)
+            probe = (px + math.cos(rad) * side_distance, py + math.sin(rad) * side_distance)
+            if not self.walls_block_line_of_sight(player_pos, probe, walls, padding=0):
+                return angle
+
+        # If both sides look blocked, still choose the shorter edge route. This
+        # is better than continuing to push upward into the wall.
+        return preferred[0][1]
+
+    def navigate_upward_route(self, player_pos, walls):
+        """Build a local route upward when no enemies are visible.
+
+        This is different from targeting a single point above the player: the
+        navigator searches the local grid for the best reachable upward-progress
+        cell and can start with a diagonal/side step to bypass walls.
+        """
+        if not getattr(self, "use_astar_navigation", False):
+            return None
+        if not getattr(self, "roam_up_route_enabled", True):
+            return None
+        try:
+            min_progress = int(getattr(self, "roam_up_min_progress_cells", 0) or 0)
+            if min_progress <= 0:
+                min_progress = None
+
+            slide_heading = self.find_upward_close_wall_slide_heading(player_pos, walls)
+            heading = self.navigator.next_upward_heading(
+                player_pos,
+                walls,
+                los_padding=self.wall_path_padding,
+                min_progress_cells=min_progress,
+            )
+
+            # If a wall is directly above and the planned heading is still
+            # pushing into it or route planning failed due close contact, slide
+            # horizontally toward the nearest wall edge first.
+            if slide_heading is not None:
+                if heading is None:
+                    return slide_heading
+                lookahead = self.TILE_SIZE * self.window_controller.scale_factor * 1.8
+                if self.is_heading_corridor_blocked(
+                    player_pos,
+                    heading,
+                    walls,
+                    distance=lookahead,
+                    padding=0,
+                    side_offset=max(8.0, float(getattr(self, "roam_up_close_wall_clearance", 42.0)) * 0.35),
+                ):
+                    return slide_heading
+
+            return heading
+        except Exception as exc:
+            if debug: print("upward nav error:", exc)
             return None
 
     @staticmethod
@@ -2530,8 +2812,13 @@ class Play(Movement):
         # Skip stale frames if bot is actively moving — positions shift.
         # Showdown uses analog joystick angles, so keys_hold is empty even while
         # the bot is moving; last_movement carries the analog movement state.
-        if self.keys_hold or isinstance(self.last_movement, float):
-            return current_walls
+        moving_now = bool(self.keys_hold or isinstance(self.last_movement, float))
+        if moving_now:
+            if not getattr(self, "wall_history_use_while_moving", True):
+                return current_walls
+            frames = max(1, int(getattr(self, "wall_history_moving_frames", 2)))
+            recent_walls = [wall for walls in self.wall_history[-frames:] for wall in walls]
+            return self.merge_wall_boxes(current_walls + recent_walls)
         historical_walls = [wall for walls in self.wall_history for wall in walls]
         stable_history = self.merge_wall_boxes(historical_walls, min_hits=max(2, self.wall_history_min_hits))
         return self.merge_wall_boxes(current_walls + stable_history)
@@ -2545,15 +2832,23 @@ class Play(Movement):
 
         # Узел 4: есть тиммейт и он далеко -> перегруппировка к нему
         if teammate_data:
-            tm_pos, tm_dist = self.find_closest_teammate(teammate_data, player_pos, walls)
+            tm_pos, tm_dist = self.find_preferred_teammate(teammate_data, player_pos, walls)
             if tm_pos is not None and tm_dist > self.teammate_follow_min_distance:
                 heading = self.navigate_heading(player_pos, tm_pos, walls)
                 if heading is not None:
                     return heading
 
-        # Узел 5: никого нет (или тиммейт уже рядом) -> идти ВВЕРХ
+        # Узел 5: никого нет (или тиммейт уже рядом) -> строить маршрут ВВЕРХ.
+        # Не просто зажимать W/270°, а искать reachable upward cell в локальной
+        # сетке и обходить стены заранее.
         if getattr(self, "roam_up_enabled", True):
-            up_target = (player_pos[0], player_pos[1] - 5000)  # точка далеко вверху
+            heading = self.navigate_upward_route(player_pos, walls)
+            if heading is not None:
+                return heading
+
+            # Fallback for disabled/failed A*: old single-target route, then
+            # direct up only if the short path is clear.
+            up_target = (player_pos[0], player_pos[1] - 5000)
             heading = self.navigate_heading(player_pos, up_target, walls)
             if heading is not None:
                 return heading
@@ -2575,7 +2870,7 @@ class Play(Movement):
             return None
         if not teammate_data:
             return None
-        tm_pos, tm_dist = self.find_closest_teammate(teammate_data, player_pos, walls)
+        tm_pos, tm_dist = self.find_preferred_teammate(teammate_data, player_pos, walls)
         if tm_pos is None or tm_dist <= self.teammate_follow_min_distance:
             return None  # тиммейтов нет или уже рядом
         return self.navigate_heading(player_pos, tm_pos, walls)
@@ -2666,7 +2961,10 @@ class Play(Movement):
         must_brawler_hold_attack = self.must_brawler_hold_attack(brawler, self.brawlers_info)
         # if a brawler has been holding an attack for its max duration + the bot setting, then we release
         if must_brawler_hold_attack and self.time_since_holding_attack is not None and time.time() - self.time_since_holding_attack >= brawler_info['hold_attack'] + self.seconds_to_hold_attack_after_reaching_max:
-            self.attack(touch_up=True, touch_down=False)
+            if self.aimed_attacks_enabled and hasattr(self.window_controller, "stop_attack_touch"):
+                self.window_controller.stop_attack_touch()
+            else:
+                self.attack(touch_up=True, touch_down=False)
             self.time_since_holding_attack = None
         safe_range, attack_range, super_range = self.get_brawler_range(brawler)
         player_pos = self.get_player_pos(player_data)
@@ -2729,6 +3027,8 @@ class Play(Movement):
                         break
                 else:
                     movement = move_horizontal + move_vertical
+        if approach and isinstance(movement, (int, float)):
+            movement = self.refine_approach_heading(player_pos, movement, walls, enemy_distance=enemy_distance)
         current_time = time.time()
         if movement != self.last_movement:
             if current_time - self.last_movement_time >= self.minimum_movement_delay:
@@ -2758,13 +3058,23 @@ class Play(Movement):
                         self.time_since_gadget_checked = time.time()
                         self.clear_ability_ready("gadget")
                 if not must_brawler_hold_attack:
-                    self.attack()
+                    attack_angle = self.angle_from_direction(direction_x, direction_y)
+                    if self.lead_shots_enabled and self.enemy_velocity != (0.0, 0.0):
+                        attack_angle = self.lead_shot_angle(
+                            player_pos,
+                            enemy_coords,
+                            self.enemy_velocity,
+                            confidence=getattr(self, "enemy_velocity_confidence", 1.0),
+                        )
+                    self.aimed_attack(attack_angle)
                 else:
                     if self.time_since_holding_attack is None:
                         self.time_since_holding_attack = time.time()
-                        self.attack(touch_up=False, touch_down=True)
+                        hold_angle = self.angle_from_direction(direction_x, direction_y)
+                        self.hold_aimed_attack(hold_angle, touch_up=False, touch_down=True)
                     elif time.time() - self.time_since_holding_attack >= self.brawlers_info[brawler]['hold_attack']:
-                        self.attack(touch_up=True, touch_down=False)
+                        hold_angle = self.angle_from_direction(direction_x, direction_y)
+                        self.hold_aimed_attack(hold_angle, touch_up=True, touch_down=False)
                         self.time_since_holding_attack = None
         return movement
 

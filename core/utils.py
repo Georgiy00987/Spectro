@@ -30,6 +30,9 @@ def _config_bool(value, default=False):
         return default
     return str(value).strip().lower() in ("1", "true", "yes", "on")
 
+# Public alias - import config_bool in other modules instead of repeating the inline pattern.
+config_bool = _config_bool
+
 
 def _developer_api_post(session, endpoint, payload, timeout):
     response = session.post(

@@ -3,7 +3,7 @@ import unittest
 import cv2
 import numpy as np
 
-from play import Movement, Play
+from control.play import Movement, Play
 
 
 class FakeWindow:

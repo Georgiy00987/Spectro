@@ -1,124 +1,106 @@
 # Spectro
 
-Spectro is a Windows automation assistant for Brawl Stars. It runs through an Android emulator, reads the current game state from the screen, and controls movement/actions through the configured emulator key layout.
+Brawl Stars bot focused on **Brawlball** mode.
 
-Dev: t.me/forget_git
+Focus areas:
+- Brawlball logic — ball tracking, goal positioning, team play
+- Bot logic and code improvements
+- Clean, maintainable codebase
 
-## Features
+Version: `0.0.2`
 
-- Brawlball-focused gameplay automation
-- Ball, wall, player, enemy and ability detection
-- Brawler queue with trophy/win targets
-- Push All queue builder for opened brawlers below a selected trophy target
-- Match history and trophy tracking
-- Discord notifications and Discord remote control
-- Telegram remote control
-- Developer tab with tests, utilities and dataset capture tools
-- ONNX Runtime backend auto-selection with CPU fallback
+---
 
 ## Requirements
 
 - Windows 64-bit
 - Python 3.11
-- Android emulator at 1920x1080
-- Windows display scaling set to 100%
+- Android emulator (LDPlayer / MuMu) at 1920x1080
 
-Supported emulator profiles:
+## Setup
 
-- LDPlayer
-- MuMu
-- BlueStacks
-- Nox
-- MEmu
-- GameLoop
+Clone the repository and install dependencies in a virtual environment:
 
-## Quick start
-
-```bat
-setup_venv.bat
-start.bat
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+python -m pip install --upgrade pip
+pip install -r requirements.txt
 ```
 
-Manual start:
+Run Spectro:
 
-```bat
-python setup.py --spectro-install
+```bash
 python run.py
 ```
 
-## Basic setup
+Optional local installer command:
 
-1. Install Python 3.11.
-2. Install and configure an Android emulator.
-3. Set emulator resolution to 1920x1080.
-4. Open Brawl Stars in the emulator.
-5. Start Spectro.
-6. In Overview, choose emulator and game mode.
-7. Configure Brawler Queue if needed.
-8. Press Start.
+```bash
+python setup.py --spectro-install
+```
 
-## Important config files
+## Config files
 
 | File | Purpose |
-| --- | --- |
-| `cfg/general_config.toml` | Emulator, performance, GPU/CPU, debug options |
-| `cfg/bot_config.toml` | Gameplay behavior and mode settings |
-| `cfg/brawler_pick.toml` | Brawler queue data, created/updated by GUI |
-| `cfg/time_tresholds.toml` | Timers for state checks and actions |
-| `cfg/brawl_stars_api.toml` | Optional Brawl Stars API token and player tag |
+|------|---------|
+| `cfg/general_config.toml` | Emulator, performance, GPU/CPU |
+| `cfg/bot_config.toml` | Gamemode, behavior |
 | `cfg/discord_config.toml` | Discord notifications and control |
 | `cfg/telegram_config.toml` | Telegram remote control |
-| `cfg/update_config.toml` | Optional updater settings |
-
-## Brawl Stars API
-
-The API config is optional, but recommended for trophy autofill and Push All. Fill:
-
-```toml
-api_token = ""
-player_tag = "#YOURTAG"
-timeout_seconds = 15
-```
+| `cfg/brawl_stars_api.toml` | Trophy autofill and Push All |
 
 ## Telegram control
 
-Fill `cfg/telegram_config.toml` and set:
+1. Create a bot via @BotFather, get the token
+2. Open `cfg/telegram_config.toml`, fill `bot_token` and `chat_id`
+3. Set `enabled = true`
+4. Start Spectro
 
-```toml
-[telegram]
-enabled = "yes"
-bot_token = "YOUR_BOT_TOKEN"
-chat_id = "YOUR_CHAT_ID"
+Commands: `/status` `/pause` `/resume` `/stop`
+
+Polling is intentionally low-frequency to minimize internet usage.
+
+## Brawl Stars API
+
+Create a developer account at https://developer.brawlstars.com/  
+Fill `cfg/brawl_stars_api.toml` for automatic trophy tracking.
+
+## GitHub update
+
+```bash
+python tools/github_update.py --check
+python tools/github_update.py
 ```
 
-Commands:
-
-```text
-/menu
-/status
-/pause
-/resume
-/stop
-```
-
-## Developer mode
-
-Developer tab is hidden by default. Enable it in `cfg/general_config.toml`:
-
-```toml
-developer = "yes"
-```
-
-It contains test runners, dataset capture tools and utility launchers.
+Set `repo = "owner/repo"` in `cfg/update_config.toml`.
 
 ## Tests
 
-```bat
-python -m unittest discover -s tests
+```bash
+python -m unittest discover
 ```
 
-## Notes
+GitHub Actions currently runs a lightweight syntax check on Windows. Full runtime tests require the Windows/emulator environment and project dependencies.
 
-- Keep personal API tokens and bot tokens out of commits.
-- The committed config files are sanitized defaults.
-- Runtime folders such as `logs`, `debug_frames`, `datasets` and `runs` are ignored by git.
+## Before publishing your fork
+
+Do not commit personal tokens, webhooks or private player tags. The public config files should use placeholders such as `YOUR_BOT_TOKEN`, empty Discord tokens and `#YOUR_TAG`. Runtime folders such as `logs/`, `debug_frames/`, `runs/`, `datasets/` and local backups are ignored by Git.
+
+## Architecture
+
+```
+spectro/
+  main.py
+  app/          runtime control, discord control
+  control/      play, navigation, window control
+  core/         utils, logging, performance
+  game/         stage manager, trophies, brawltracker
+  gui/          hub, login, brawler selection
+  integrations/ discord, telegram, api sync
+  vision/       detection, state finder, HP
+```
+
+---
+
+Author: forgeter - tg @frendls

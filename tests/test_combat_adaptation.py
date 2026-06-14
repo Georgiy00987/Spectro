@@ -1,7 +1,7 @@
 import math
 import unittest
 
-from play import Play
+from control.play import Play
 
 
 class CombatAdaptationTests(unittest.TestCase):
